@@ -18,15 +18,17 @@ def apply_hours_and_fuzzy_filters(
     night_start: int = 19, 
     fuzzy_thresh: int = 80, 
     dist_m: int = 100,
-    target_audit: str = None  # <-- PARAMETER FOR FREE TEXT AUDIT
-) -> pl.DataFrame:
+    items_to_track: list[str] = None
+) -> tuple[pl.DataFrame, list[str] | None, str | None]:
     """
     Applies hours filters, global mislabeling filter, and fuzzy + spatial deduplication.
-    If 'target_audit' is provided, it prints the traceability of the matching records.
+    Correctly enforces minimum weekly hours (treating missing/null hours as failing the filter)
+    and tracks traceability across steps when 'items_to_track' is provided.
     """
-    
-    if target_audit:
-        print(f"\n{'='*50}\n🔍 AUDITING: '{target_audit}'\n{'='*50}")
+    is_auditing = items_to_track is not None and len(items_to_track) > 0
+
+    # Add row index for precise tracking of drop reasons
+    df = df.with_row_index("__row_id")
 
     # 1. Normalization for name filters
     def normalize_name(name):
@@ -51,16 +53,14 @@ def apply_hours_and_fuzzy_filters(
         .alias("flag_global_keywords")
     )
     
-    if target_audit:
-        target_norm = normalize_name(target_audit)
-        audit_rows = df.filter(pl.col("_name_lower").str.contains(target_norm))
-        if audit_rows.height > 0:
-            survived = audit_rows.filter(pl.col("flag_global_keywords") == True).height
-            removed = audit_rows.height - survived
-            print(f"STEP 2 (Mislabeling): {survived} survived, {removed} removed by global keyword.")
-        else:
-            print("STEP 2 (Mislabeling): The record does not exist in the original DataFrame.")
-    
+    # Initialize drop_reason for records failing global keywords
+    df = df.with_columns(
+        pl.when(pl.col("flag_global_keywords").not_())
+        .then(pl.lit("1_Global_Keywords"))
+        .otherwise(pl.lit(None))
+        .alias("drop_reason")
+    )
+
     # 3. Vectorized / mapped auxiliary hours functions
     DAY_COLS = ['monday_hours','tuesday_hours','wednesday_hours','thursday_hours','friday_hours','saturday_hours','sunday_hours']
     BAD_HOURS = {'Not available', '', 'nan', '00:00-00:00'}
@@ -118,18 +118,22 @@ def apply_hours_and_fuzzy_filters(
         pl.Series("_is_night_only", is_night_list, dtype=pl.Boolean)
     ])
     
+    # Corrected logic: Fail if night-only, if hours are missing/null, or if weekly hours < min_hours
     df = df.with_columns(
         (
             (pl.col("_is_night_only") == True) |
-            (pl.col("_total_weekly_hours").is_not_null() & (pl.col("_total_weekly_hours") < min_hours))
+            pl.col("_total_weekly_hours").is_null() |
+            (pl.col("_total_weekly_hours") < min_hours)
         ).not_().alias("flag_hours")
     )
     
-    if target_audit and audit_rows.height > 0:
-        audit_rows = df.filter(pl.col("_name_lower").str.contains(target_norm))
-        survived = audit_rows.filter(pl.col("flag_hours") == True).height
-        removed = audit_rows.height - survived
-        print(f"STEP 3 (Hours): {survived} survived, {removed} removed (night only or < {min_hours}h).")
+    # Update drop_reason if dropped at hours filter (only if not already dropped)
+    df = df.with_columns(
+        pl.when(pl.col("drop_reason").is_null() & pl.col("flag_hours").not_())
+        .then(pl.lit("2_Hours_Filter"))
+        .otherwise(pl.col("drop_reason"))
+        .alias("drop_reason")
+    )
 
     # 4. Fuzzy + Spatial Filter
     cands_mask_expr = (
@@ -160,34 +164,84 @@ def apply_hours_and_fuzzy_filters(
                 sim_score = _name_sim(name_i, cands_names[j])
                 if sim_score >= fuzzy_thresh:
                     dup_local.add(j)
-                    
-                    # Audit log if it collides with your target
-                    if target_audit:
-                        if target_norm in name_i or target_norm in cands_names[j]:
-                            print(f"\n⚠️ STEP 4 (Deduplication): Collision detected!")
-                            print(f"   > Kept: '{name_i}'")
-                            print(f"   > Removed: '{cands_names[j]}'")
-                            print(f"   > Similarity: {sim_score:.1f}%")
 
     cands_indices = np.where(cands_mask)[0]
-    dup_df_idx = set(cands_indices[list(dup_local)]) if dup_local else set()
-    
-    flag_fuzzy_list = [i not in dup_df_idx for i in range(df.height)]
+    fuzzy_dropped_row_ids = set()
+    if dup_local:
+        for idx in cands_indices[list(dup_local)]:
+            fuzzy_dropped_row_ids.add(idx)
+
+    flag_fuzzy_list = [row_id not in fuzzy_dropped_row_ids for row_id in df.get_column("__row_id").to_list()]
     df = df.with_columns(pl.Series("flag_fuzzy_dedup", flag_fuzzy_list, dtype=pl.Boolean))
     
-    # 5. Filter the dataframe by combining the flags
-    df_clean = df.filter(
-        pl.col("flag_global_keywords") & 
-        pl.col("flag_hours") & 
-        pl.col("flag_fuzzy_dedup")
+    # Update drop_reason if dropped at fuzzy dedup
+    df = df.with_columns(
+        pl.when(pl.col("drop_reason").is_null() & (pl.col("flag_fuzzy_dedup") == False))
+        .then(pl.lit("3_Fuzzy_Dedup"))
+        .otherwise(pl.col("drop_reason"))
+        .alias("drop_reason")
     )
     
-    if target_audit:
-        final_count = df_clean.filter(pl.col("_name_lower").str.contains(target_norm)).height
-        print(f"\n🏁 FINAL RESULT: {final_count} record(s) of '{target_audit}' reached the final DataFrame.")
-        print(f"{'='*50}\n")
+    # Separate survivors and dropped records
+    df_dropped = df.filter(pl.col("drop_reason").is_not_null())
+    df_survivors = df.filter(pl.col("drop_reason").is_null()).drop(
+        ['__row_id', '_name_lower', '_total_weekly_hours', '_is_night_only', 'flag_global_keywords', 'flag_hours', 'flag_fuzzy_dedup', 'drop_reason'], 
+        strict=False
+    )
     
-    # Clean up temporary columns
-    cols_to_drop = ['_name_lower', '_total_weekly_hours', '_is_night_only', 'flag_global_keywords', 'flag_hours', 'flag_fuzzy_dedup']
-    df_clean = df_clean.drop(cols_to_drop, strict=False)
-    return df_clean
+    if not is_auditing:
+        return df_survivors, items_to_track, None
+
+    # --- BUILD AUDIT REPORT & UPDATE TRACKED ITEMS ---
+    report_lines = []
+    dropped_items_set = set()
+
+    for text in items_to_track:
+        text_lower = text.lower()
+        survived = df_survivors.filter(
+            pl.col("name")
+            .str.to_lowercase()
+            .str.contains(text_lower, literal=True)
+        )
+        dropped = df_dropped.filter(
+            pl.col("name")
+            .str.to_lowercase()
+            .str.contains(text_lower, literal=True)
+        )
+
+        if len(survived) == 0 and len(dropped) == 0:
+            continue
+
+        report_lines.append(f"\n🔍 Tracked text: '{text}'")
+
+        if len(survived) > 0:
+            report_lines.append(
+                f"    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
+            )
+
+        if len(dropped) > 0:
+            dropped_items_set.add(text)
+            reasons = dropped.group_by("drop_reason").agg(
+                pl.len().alias("count")
+            )
+            for row in reasons.iter_rows():
+                report_lines.append(
+                    f"    ❌ DROPPED: Removed at this step due to: [{row[0]}] ({row[1]} records dropped)."
+                )
+
+    updated_items_to_track = [
+        item for item in items_to_track if item not in dropped_items_set
+    ]
+
+    if len(report_lines) == 0:
+        return df_survivors, updated_items_to_track, None
+
+    final_report_text = (
+        "=" * 45
+        + "\n🎯 AUDIT: MODULE 4 (Hours and Fuzzy Filters)\n"
+        + "=" * 45
+        + "".join(report_lines)
+        + "\n"
+    )
+
+    return df_survivors, updated_items_to_track, final_report_text
