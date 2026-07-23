@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from src.utils import deduplicate_records, log_row_reduction
+from src.utils import deduplicate_records, log_row_reduction, init_audit_file, write_audit_step, finalize_audit_report
 from src.normalize import normalize_names
 from src.chain_removal import filter_chains_and_duplicates
 from src.geo_dedup import balltree_spatial_deduplication
@@ -25,7 +25,7 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     OUTPUT_FILE = DATA_DIR / "processed" / "dataplor_final_pipeline_output.csv"
 
     logging.info(f"Starting pipeline. Modules: {modules_to_run} | Auditing items: {items_to_track}")
-    
+    audit_file = init_audit_file(DATA_DIR, items_to_track)  
     # Load initial data
     df = pd.read_csv(INPUT_FILE, low_memory=False, encoding='utf-8')
     current_df = pl.from_pandas(df)
@@ -37,10 +37,12 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     if 1 in modules_to_run:
         logging.info("Executing Module 1: Normalization...")
         prev_df = current_df
+
         current_df = deduplicate_records(
             df=normalize_names(current_df), 
             subset=["name_normalized", "latitude", "longitude"]
         )
+
         if save_tracking: current_df.write_csv(DATA_DIR / "processed" / "01_normalized_deduped.csv", include_bom=True)
         log_row_reduction(prev_df, current_df, "Module 1")
 
@@ -48,7 +50,16 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     if 2 in modules_to_run:
         logging.info("Executing Module 2: Chain removal...")
         prev_df = current_df
-        current_df = filter_chains_and_duplicates(current_df, False)
+
+        current_df, items_to_track, mod_report = filter_chains_and_duplicates(
+            df=current_df,
+            filter_duplicates= False,
+            max_appearances=4,
+            items_to_track=items_to_track
+            )
+        
+        if mod_report:
+            write_audit_step(audit_file, "MODULE 2 (Chain Filter)", mod_report)
         if save_tracking: current_df.write_csv(DATA_DIR / "processed" / "02_chains_filtered.csv", include_bom=True)
         log_row_reduction(prev_df, current_df, "Module 2")
 
@@ -56,7 +67,16 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     if 3 in modules_to_run:
         logging.info("Executing Module 3: BallTree Deduplication...")
         prev_df = current_df
-        current_df = balltree_spatial_deduplication(current_df, radius_meters=50)
+
+        current_df, items_to_track, mod_report = balltree_spatial_deduplication(
+            current_df,
+            radius_meters=50,
+            items_to_track=items_to_track
+            )
+
+        if mod_report:
+            write_audit_step(audit_file, "MODULE 3 (BallTree Filter)", mod_report)
+
         if save_tracking: current_df.write_csv(DATA_DIR / "processed" / "03_geo_balltree_deduped.csv", include_bom=True)
         log_row_reduction(prev_df, current_df, "Module 3")
 
@@ -64,7 +84,18 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     if 4 in modules_to_run:
         logging.info("Executing Module 4: Hours and Fuzzy Deduplication...")
         prev_df = current_df
-        current_df = apply_hours_and_fuzzy_filters(current_df, min_hours=20, night_start=19, fuzzy_thresh=80, dist_m=100)
+
+        current_df, items_to_track, mod_report = apply_hours_and_fuzzy_filters(
+            current_df,
+            min_hours=20,
+            night_start=19,
+            fuzzy_thresh=80,
+            dist_m=100,
+            items_to_track=items_to_track
+            )
+        if mod_report:
+            write_audit_step(audit_file, "MODULE 4 (Hours and Fuzzy Filter)", mod_report)
+
         if save_tracking: current_df.write_csv(DATA_DIR / "processed" / "04_hours_fuzzy_filtered.csv", include_bom=True)
         log_row_reduction(prev_df, current_df, "Module 4")
 
@@ -72,7 +103,14 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     if 5 in modules_to_run:
         logging.info("Executing Module 5: Final exclusion via external regex...") 
         prev_df = current_df
-        current_df, _ = final_keyword_exclusion(current_df, EXTERNAL_KEYWORDS)
+        current_df, items_to_track, mod_report = final_keyword_exclusion(
+            current_df,
+            EXTERNAL_KEYWORDS,
+            items_to_track=items_to_track
+            )
+        if mod_report:
+            write_audit_step(audit_file, "MODULE 5 (Regex Filter)", mod_report)
+
         if save_tracking: current_df.write_csv(DATA_DIR / "processed" / "05_external_regex_excluded.csv", include_bom=True)
         log_row_reduction(prev_df, current_df, "Module 5")
 
@@ -85,7 +123,7 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
 
 if __name__ == "__main__":
     # --- 1. Choose which modules to run ---
-    modules_to_run = [1, 2, 3, 4, 5]
+    modules_to_run = [1, 2, 3, 4, 5 ]
     
     # --- 2. Enable/Disable saving huge intermediate CSVs ---
     save_intermediate_csvs = False 
@@ -93,7 +131,12 @@ if __name__ == "__main__":
     # --- 3. AUDIT TRACKING LIST ---
     # Put the text you want to track here (e.g., store names, specific words)
     # Leave it as an empty list [] if you don't want to track anything.
-    track_these_elements = ["texto1", "texto2", "starbucks"] 
+    track_these_elements = [
+        'GONZALEZ MARTINEZ ARMANDO',
+        'MERCADO FERROVEJEROS',
+        'FARMACIA GUADALAJARA GARIBALDI',
+        'FARMACIA GUADALAJARA GARIBALDI'
+        ] 
     
     run_pipeline(
         modules_to_run=modules_to_run, 
