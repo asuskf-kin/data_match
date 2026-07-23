@@ -1,10 +1,10 @@
 import logging
 import time
-from pathlib import Path
 
 import pandas as pd
 import polars as pl
 
+from config.settings import ACTIVE_COUNTRY, DATA_DIR, INPUT_FILE, OUTPUT_FILE
 from src.adv_filters import apply_hours_and_fuzzy_filters
 from src.chain_removal import filter_chains_and_duplicates
 from src.final_regex import final_keyword_exclusion
@@ -27,14 +27,15 @@ logging.basicConfig(
 def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     start_time = time.time()
 
-    # 1. Path definitions
-    DATA_DIR = Path("data")
-    INPUT_FILE = DATA_DIR / "raw" / "dataplor_cleaned.csv"
-    OUTPUT_FILE = DATA_DIR / "processed" / "dataplor_final_pipeline_output.csv"
-
     logging.info(
         f"Starting pipeline. Modules: {modules_to_run} | Auditing items: {items_to_track}"
     )
+    print("=" * 50)
+    print(f"🚀 STARTING PIPELINE FOR COUNTRY: {ACTIVE_COUNTRY.upper()}")
+    print("=" * 50)
+
+    print(f"📁 Input file: {INPUT_FILE}")
+    print(f"📁 Output file: {OUTPUT_FILE}\n")
 
     # Inicialización de auditorías y reportes
     audit_file = init_audit_file(DATA_DIR, items_to_track)

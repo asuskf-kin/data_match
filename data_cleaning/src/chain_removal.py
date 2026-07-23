@@ -1,6 +1,6 @@
-import re
 import polars as pl
-from config.patterns_mx import CHAIN_REGEX
+
+from config.settings import GLOBAL_CHAIN_REGEX
 
 
 def filter_chains_and_duplicates(
@@ -41,7 +41,7 @@ def filter_chains_and_duplicates(
             "Column 'name_normalized' is missing. Run normalize_names first."
         )
 
-    chain_pattern = "(?i)" + "|".join(f"(?:{p})" for p in CHAIN_REGEX)
+    chain_pattern = "(?i)" + "|".join(f"(?:{p})" for p in GLOBAL_CHAIN_REGEX)
 
     df_clean = df.with_columns(
         pl.col("name_normalized")
@@ -66,8 +66,7 @@ def filter_chains_and_duplicates(
             )
         if "identified_as_chain" in df_clean.columns:
             df_clean = df_clean.filter(
-                pl.col("identified_as_chain").cast(pl.String).fill_null("")
-                != "True"
+                pl.col("identified_as_chain").cast(pl.String).fill_null("") != "True"
             )
         # Returns the DataFrame, leaving items_to_track untouched (or None)
         return df_clean.drop("_filter_key"), items_to_track, None
@@ -75,9 +74,7 @@ def filter_chains_and_duplicates(
     # ==========================================
     # 🔍 AUDIT MODE (Only applies tracking logic here)
     # ==========================================
-    df_clean = df_clean.with_columns(
-        pl.lit(None).cast(pl.String).alias("drop_reason")
-    )
+    df_clean = df_clean.with_columns(pl.lit(None).cast(pl.String).alias("drop_reason"))
 
     # 1. Regex Filter (Chains)
     regex_mask = pl.col("_filter_key").str.contains(chain_pattern).fill_null(False)
@@ -150,9 +147,7 @@ def filter_chains_and_duplicates(
         if len(dropped) > 0:
             # Mark item as dropped to remove it from items_to_track
             dropped_items_set.add(text)
-            reasons = dropped.group_by("drop_reason").agg(
-                pl.len().alias("count")
-            )
+            reasons = dropped.group_by("drop_reason").agg(pl.len().alias("count"))
             for row in reasons.iter_rows():
                 report_lines.append(
                     f"    ❌ DROPPED: Removed at this step due to: [{row[0]}] ({row[1]} records dropped)."
