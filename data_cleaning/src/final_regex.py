@@ -1,13 +1,14 @@
 # src/05_final_regex.py
 import re
-from pathlib import Path
+
 import polars as pl
+
+from config.global_exclude import FINAL_KEYWORD_EXCLUDE_KEYWORDS
 from config.keep_words import KEEP_WORDS
 
 
 def final_keyword_exclusion(
     df: pl.DataFrame,
-    keywords_csv_path: str,
     items_to_track: list[str] = None,
 ) -> tuple[pl.DataFrame, list[str] | None, str | None]:
     """Filters businesses based on an external keywords CSV file, using Regular Expressions while respecting a whitelist (KEEP_WORDS).
@@ -33,16 +34,7 @@ def final_keyword_exclusion(
     is_auditing = items_to_track is not None and len(items_to_track) > 0
 
     # 1. Read external keywords
-    try:
-        df_keywords = pl.read_csv(keywords_csv_path, infer_schema_length=0)
-        col_name = df_keywords.columns[0]
-        keywords = df_keywords.get_column(col_name).drop_nulls().to_list()
-    except Exception as e:
-        print(
-            f"Error reading {keywords_csv_path}: {e}. Returning unfiltered dataset."
-        )
-        return df, items_to_track, None
-
+    keywords = FINAL_KEYWORD_EXCLUDE_KEYWORDS
     if df.is_empty() or not keywords:
         return df, items_to_track, None
 
@@ -89,9 +81,7 @@ def final_keyword_exclusion(
                 return kw
         return None
 
-    kws = keywords + [
-        remove_accents(kw) for kw in keywords if remove_accents(kw) != kw
-    ]
+    kws = keywords + [remove_accents(kw) for kw in keywords if remove_accents(kw) != kw]
     use_regex = contains_special_characters(kws)
 
     if not use_regex:
@@ -115,9 +105,7 @@ def final_keyword_exclusion(
         for i in range(0, len(pattern_list), chunk_size):
             chunk = pattern_list[i : i + chunk_size]
             regex_str = "(?i)" + "|".join(chunk)
-            exprs.append(
-                pl.col(col_name).str.contains(regex_str).fill_null(False)
-            )
+            exprs.append(pl.col(col_name).str.contains(regex_str).fill_null(False))
         return pl.any_horizontal(exprs)
 
     # 3. Apply Regex and mask exceptions (using chunks)
@@ -133,15 +121,11 @@ def final_keyword_exclusion(
     # Detect exact keyword responsible
     df_temp = df_temp.with_columns(
         pl.col("name")
-        .map_elements(
-            lambda x: detect_keyword(x, keywords), return_dtype=pl.String
-        )
+        .map_elements(lambda x: detect_keyword(x, keywords), return_dtype=pl.String)
         .alias("detected_keyword")
     )
 
-    df_filtered_out_full = df_temp.filter(
-        pl.col("detected_keyword").is_not_null()
-    )
+    df_filtered_out_full = df_temp.filter(pl.col("detected_keyword").is_not_null())
     excluded_ids = df_filtered_out_full.get_column("__row_id")
 
     # Flag drop reasons for the audit step
@@ -167,9 +151,9 @@ def final_keyword_exclusion(
     # 🚀 FAST MODE (No auditing)
     # ==========================================
     if not is_auditing:
-        df_survivors = df_clean.filter(
-            pl.col("drop_reason").is_null()
-        ).drop(["__row_id", "drop_reason"], strict=False)
+        df_survivors = df_clean.filter(pl.col("drop_reason").is_null()).drop(
+            ["__row_id", "drop_reason"], strict=False
+        )
         return df_survivors, items_to_track, None
 
     # ==========================================
@@ -189,14 +173,10 @@ def final_keyword_exclusion(
     for text in items_to_track:
         text_lower = text.lower()
         survived = df_survivors.filter(
-            pl.col("name")
-            .str.to_lowercase()
-            .str.contains(text_lower, literal=True)
+            pl.col("name").str.to_lowercase().str.contains(text_lower, literal=True)
         )
         dropped = df_dropped.filter(
-            pl.col("name")
-            .str.to_lowercase()
-            .str.contains(text_lower, literal=True)
+            pl.col("name").str.to_lowercase().str.contains(text_lower, literal=True)
         )
 
         if len(survived) == 0 and len(dropped) == 0:
@@ -211,9 +191,7 @@ def final_keyword_exclusion(
 
         if len(dropped) > 0:
             dropped_items_set.add(text)
-            reasons = dropped.group_by("drop_reason").agg(
-                pl.len().alias("count")
-            )
+            reasons = dropped.group_by("drop_reason").agg(pl.len().alias("count"))
             for row in reasons.iter_rows():
                 report_lines.append(
                     f"    ❌ DROPPED: Removed at this step due to: [{row[0]}] ({row[1]} records dropped)."
