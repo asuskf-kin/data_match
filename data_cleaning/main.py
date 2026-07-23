@@ -1,3 +1,4 @@
+# main.py
 import logging
 import time
 
@@ -7,6 +8,7 @@ import polars as pl
 from config.settings import ACTIVE_COUNTRY, DATA_DIR, INPUT_FILE, OUTPUT_FILE
 from src.adv_filters import apply_hours_and_fuzzy_filters
 from src.chain_removal import filter_chains_and_duplicates
+from src.drop_tracker import save_dropped_records  # <--- NEW IMPORT
 from src.final_regex import final_keyword_exclusion
 from src.geo_dedup import balltree_spatial_deduplication
 from src.normalize import normalize_names
@@ -24,7 +26,9 @@ logging.basicConfig(
 )
 
 
-def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
+def run_pipeline(
+    modules_to_run, save_tracking=True, save_drops=True, items_to_track=None
+):  # <--- ADDED save_drops
     start_time = time.time()
 
     logging.info(
@@ -37,18 +41,18 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
     print(f"📁 Input file: {INPUT_FILE}")
     print(f"📁 Output file: {OUTPUT_FILE}\n")
 
-    # Inicialización de auditorías y reportes
     audit_file = init_audit_file(DATA_DIR, items_to_track)
     report_metrics = []
 
-    # Load initial data
     df = pd.read_csv(INPUT_FILE, low_memory=False, encoding="utf-8")
     current_df = pl.from_pandas(df)
     initial_data_ref = current_df
 
     logging.info(f"Initial records: {len(current_df)}")
 
+    # ==========================================
     # Module 1: Normalization
+    # ==========================================
     if 1 in modules_to_run:
         logging.info("Executing Module 1: Normalization...")
         prev_df = current_df
@@ -58,18 +62,24 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
             subset=["name_normalized", "latitude", "longitude"],
         )
 
-        # Registrar métricas para el reporte HTML
         report_metrics.append(
             analyze_step_drop(prev_df, current_df, "Module 1: Normalization")
         )
+        filename_mod1 = "01_normalized_deduped.csv"
 
         if save_tracking:
             current_df.write_csv(
-                DATA_DIR / "processed" / "01_normalized_deduped.csv", include_bom=True
+                DATA_DIR / "processed" / filename_mod1, include_bom=True
             )
+
+        # NEW LINE: Save dropped records
+        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod1, save_drops)
+
         log_row_reduction(prev_df, current_df, "Module 1")
 
+    # ==========================================
     # Module 2: Chain filter
+    # ==========================================
     if 2 in modules_to_run:
         logging.info("Executing Module 2: Chain removal...")
         prev_df = current_df
@@ -87,14 +97,21 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
         report_metrics.append(
             analyze_step_drop(prev_df, current_df, "Module 2: Chain Filter")
         )
+        filename_mod2 = "02_chains_filtered.csv"
 
         if save_tracking:
             current_df.write_csv(
-                DATA_DIR / "processed" / "02_chains_filtered.csv", include_bom=True
+                DATA_DIR / "processed" / filename_mod2, include_bom=True
             )
+
+        # NEW LINE: Save dropped records
+        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod2, save_drops)
+
         log_row_reduction(prev_df, current_df, "Module 2")
 
+    # ==========================================
     # Module 3: Geo Deduplication
+    # ==========================================
     if 3 in modules_to_run:
         logging.info("Executing Module 3: BallTree Deduplication...")
         prev_df = current_df
@@ -109,14 +126,21 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
         report_metrics.append(
             analyze_step_drop(prev_df, current_df, "Module 3: BallTree Dedup")
         )
+        filename_mod3 = "03_geo_balltree_deduped.csv"
 
         if save_tracking:
             current_df.write_csv(
-                DATA_DIR / "processed" / "03_geo_balltree_deduped.csv", include_bom=True
+                DATA_DIR / "processed" / filename_mod3, include_bom=True
             )
+
+        # NEW LINE: Save dropped records
+        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod3, save_drops)
+
         log_row_reduction(prev_df, current_df, "Module 3")
 
+    # ==========================================
     # Module 4: Hours and Fuzzy
+    # ==========================================
     if 4 in modules_to_run:
         logging.info("Executing Module 4: Hours and Fuzzy Deduplication...")
         prev_df = current_df
@@ -138,14 +162,21 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
         report_metrics.append(
             analyze_step_drop(prev_df, current_df, "Module 4: Hours & Fuzzy")
         )
+        filename_mod4 = "04_hours_fuzzy_filtered.csv"
 
         if save_tracking:
             current_df.write_csv(
-                DATA_DIR / "processed" / "04_hours_fuzzy_filtered.csv", include_bom=True
+                DATA_DIR / "processed" / filename_mod4, include_bom=True
             )
+
+        # NEW LINE: Save dropped records
+        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod4, save_drops)
+
         log_row_reduction(prev_df, current_df, "Module 4")
 
+    # ==========================================
     # Module 5: Final Regex
+    # ==========================================
     if 5 in modules_to_run:
         logging.info("Executing Module 5: Final exclusion via external regex...")
         prev_df = current_df
@@ -160,21 +191,24 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
         report_metrics.append(
             analyze_step_drop(prev_df, current_df, "Module 5: Final Regex")
         )
+        filename_mod5 = "05_external_regex_excluded.csv"
 
         if save_tracking:
             current_df.write_csv(
-                DATA_DIR / "processed" / "05_external_regex_excluded.csv",
-                include_bom=True,
+                DATA_DIR / "processed" / filename_mod5, include_bom=True
             )
+
+        # NEW LINE: Save dropped records
+        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod5, save_drops)
+
         log_row_reduction(prev_df, current_df, "Module 5")
 
-    # --- CIERRE DE AUDITORÍA Y GENERACIÓN DE REPORTE HTML ---
+    # --- CLOSING & REPORTS ---
     finalize_audit_report(audit_file, current_df, items_to_track)
 
     if report_metrics:
         generate_html_report(report_metrics, DATA_DIR)
 
-    # Save final results
     log_row_reduction(initial_data_ref, current_df, "Full Pipeline Process")
     current_df.write_csv(OUTPUT_FILE, include_bom=True)
 
@@ -183,19 +217,17 @@ def run_pipeline(modules_to_run, save_tracking=True, items_to_track=None):
 
 
 if __name__ == "__main__":
-    # --- 1. Choose which modules to run ---
     modules_to_run = [1, 2, 3, 4, 5]
 
-    # --- 2. Enable/Disable saving huge intermediate CSVs ---
+    # --- BOOLEANS TO CONTROL THE FLOW ---
     save_intermediate_csvs = False
+    save_dropped_csvs = True
 
-    # --- 3. AUDIT TRACKING LIST ---
-    # Put the text you want to track here (e.g., store names, specific words)
-    # Leave it as an empty list [] if you don't want to track anything.
     track_these_elements = []
 
     run_pipeline(
         modules_to_run=modules_to_run,
         save_tracking=save_intermediate_csvs,
+        save_drops=save_dropped_csvs,
         items_to_track=track_these_elements,
     )

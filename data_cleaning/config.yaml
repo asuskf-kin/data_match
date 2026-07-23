@@ -1,12 +1,12 @@
 pipeline_settings:
   # Set the active country for the pipeline (e.g., "cr", "mx", "co")
-  active_country: "cr"
+  active_country: "mx"
 
 
 paths:
   # Base data directory
   data_dir: "data"
-  
+
   # Paths are declared relative to the project root directory
   raw_data: "data/raw/dataplor_cleaned.csv"
   
