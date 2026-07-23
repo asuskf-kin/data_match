@@ -8,7 +8,8 @@ import polars as pl
 from config.settings import ACTIVE_COUNTRY, DATA_DIR, INPUT_FILE, OUTPUT_FILE
 from src.adv_filters import apply_hours_and_fuzzy_filters
 from src.chain_removal import filter_chains_and_duplicates
-from src.drop_tracker import save_dropped_records  # <--- NEW IMPORT
+from src.crowded_property import filter_crowded_same_property
+from src.drop_tracker import save_dropped_records
 from src.final_regex import final_keyword_exclusion
 from src.geo_dedup import balltree_spatial_deduplication
 from src.normalize import normalize_names
@@ -203,6 +204,36 @@ def run_pipeline(
 
         log_row_reduction(prev_df, current_df, "Module 5")
 
+    # Module 6: Crowded Same Property Filter
+    if 6 in modules_to_run:
+        logging.info("Executing Module 6: Crowded Same Property Filter...")
+        prev_df = current_df
+
+        # Default threshold=4 and radius_m=100 as per the notebook settings
+        current_df, items_to_track, mod_report = filter_crowded_same_property(
+            current_df, threshold=4, radius_m=100.0, items_to_track=items_to_track
+        )
+
+        if mod_report:
+            write_audit_step(
+                audit_file, "MODULE 6 (Crowded Property Filter)", mod_report
+            )
+
+        report_metrics.append(
+            analyze_step_drop(prev_df, current_df, "Module 6: Crowded Property")
+        )
+        filename_mod6 = "06_crowded_properties_filtered.csv"
+
+        if save_tracking:
+            current_df.write_csv(
+                DATA_DIR / "processed" / filename_mod6, include_bom=True
+            )
+
+        # Save dropped records using your drop tracker
+        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod6, save_drops)
+
+        log_row_reduction(prev_df, current_df, "Module 6")
+
     # --- CLOSING & REPORTS ---
     finalize_audit_report(audit_file, current_df, items_to_track)
 
@@ -217,7 +248,7 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    modules_to_run = [1, 2, 3, 4, 5]
+    modules_to_run = [1, 2, 3, 4, 5, 6]
 
     # --- BOOLEANS TO CONTROL THE FLOW ---
     save_intermediate_csvs = False
