@@ -2,7 +2,7 @@
 paths:
   raw_file: "data/raw/part-00000-e8bf5a9d-af4f-4d1d-890c-cc4422d50c68-c000.snappy.parquet"
   reports_dir: "reports/data_health"
-  geojson_boundaries: "data/raw/Arca_continental_mx.geojson"  # NEW: Path to your GeoJSON file
+  geojson_boundaries: "data/raw/Arca_territorio_por_estado.geojson"  # NEW: Path to your GeoJSON file
 
 parameters:
   min_weekly_hours: 20
