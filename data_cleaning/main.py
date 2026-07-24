@@ -103,6 +103,7 @@ def run_pipeline(
     print(f"📁 Input file: {INPUT_FILE}")
     print(f"📁 Output file: {OUTPUT_FILE}\n")
 
+    # 1. Initialize Audit File (.txt)
     audit_file = init_audit_file(DATA_DIR, items_to_track)
     report_metrics = []
 
@@ -129,29 +130,43 @@ def run_pipeline(
             current_df, items_to_track
         )
 
-        # Centralized reporting and saving logic
+        # 2. Write module report to .txt audit file
         if mod_report:
             write_audit_step(
                 audit_file, f"MODULE {mod_id} ({step['name']})", mod_report
             )
 
-        report_metrics.append(analyze_step_drop(prev_df, current_df, step["name"]))
+        # 3. Collect metrics for HTML report
+        try:
+            report_metrics.append(analyze_step_drop(prev_df, current_df, step["name"]))
+        except Exception as e:
+            logging.warning(f"Could not generate metrics for {step['name']}: {e}")
 
+        # Save files
         if save_tracking:
             current_df.write_csv(
                 DATA_DIR / "processed" / step["file"], include_bom=True
             )
 
-        save_dropped_records(prev_df, current_df, DATA_DIR, step["file"], save_drops)
+        if save_drops:
+            try:
+                save_dropped_records(
+                    prev_df, current_df, DATA_DIR, step["file"], save_drops
+                )
+            except Exception as e:
+                logging.warning(f"Could not save drops for {step['name']}: {e}")
+
         log_row_reduction(prev_df, current_df, f"Module {mod_id}")
 
-    # ==========================================
-    # Closing and Final Reports
-    # ==========================================
+    # 4. Finalize audit file .txt
     finalize_audit_report(audit_file, current_df, items_to_track)
 
+    # 5. Generate HTML Drop Report
     if report_metrics:
-        generate_html_report(report_metrics, DATA_DIR)
+        try:
+            generate_html_report(report_metrics, DATA_DIR)
+        except Exception as e:
+            logging.warning(f"Could not generate HTML report: {e}")
 
     log_row_reduction(initial_data_ref, current_df, "Full Pipeline Process")
     current_df.write_csv(OUTPUT_FILE, include_bom=True)
@@ -166,6 +181,8 @@ if __name__ == "__main__":
     # --- BOOLEANS TO CONTROL THE FLOW ---
     save_intermediate_csvs = True
     save_dropped_csvs = True
+
+    # Elements to track during the pipeline
     track_these_elements = ["CLUB DE NUTRICION HERBALIFE"]
 
     run_pipeline(
