@@ -72,6 +72,7 @@ PIPELINE_STEPS = {
             fuzzy_thresh=80,
             dist_m=100,
             items_to_track=items,
+            apply_hours_filter=False,
         ),
     },
     5: {
