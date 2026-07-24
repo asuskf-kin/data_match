@@ -77,7 +77,6 @@ PIPELINE_STEPS = {
     5: {
         "name": "Module 5: Final Regex",
         "file": "05_external_regex_excluded.csv",
-        # Eliminada la variable EXTERNAL_KEYWORDS
         "func": lambda df, items: final_keyword_exclusion(df, items_to_track=items),
     },
     6: {
@@ -108,7 +107,6 @@ def run_pipeline(
     audit_file = init_audit_file(DATA_DIR, items_to_track)
     report_metrics = []
 
-    # Load Data (Pandas -> Polars)
     df = pd.read_csv(INPUT_FILE, low_memory=False, encoding="utf-8")
     current_df = pl.from_pandas(df)
     initial_data_ref = current_df
