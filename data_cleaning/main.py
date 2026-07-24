@@ -27,9 +27,71 @@ logging.basicConfig(
 )
 
 
+# ==========================================
+# Adapter to standardize outputs
+# ==========================================
+def _run_module_1(df, items_to_track):
+    """Wraps Module 1 so it returns (df, items, report) just like the others."""
+    df_norm = deduplicate_records(
+        df=normalize_names(df),
+        subset=["name_normalized", "latitude", "longitude"],
+    )
+    return df_norm, items_to_track, None
+
+
+# ==========================================
+# Pipeline Configuration
+# ==========================================
+PIPELINE_STEPS = {
+    1: {
+        "name": "Module 1: Normalization",
+        "file": "01_normalized_deduped.csv",
+        "func": _run_module_1,
+    },
+    2: {
+        "name": "Module 2: Chain Filter",
+        "file": "02_chains_filtered.csv",
+        "func": lambda df, items: filter_chains_and_duplicates(
+            df, filter_duplicates=False, max_appearances=4, items_to_track=items
+        ),
+    },
+    3: {
+        "name": "Module 3: BallTree Dedup",
+        "file": "03_geo_balltree_deduped.csv",
+        "func": lambda df, items: balltree_spatial_deduplication(
+            df, radius_meters=50, items_to_track=items
+        ),
+    },
+    4: {
+        "name": "Module 4: Hours & Fuzzy",
+        "file": "04_hours_fuzzy_filtered.csv",
+        "func": lambda df, items: apply_hours_and_fuzzy_filters(
+            df,
+            min_hours=20,
+            night_start=19,
+            fuzzy_thresh=80,
+            dist_m=100,
+            items_to_track=items,
+        ),
+    },
+    5: {
+        "name": "Module 5: Final Regex",
+        "file": "05_external_regex_excluded.csv",
+        "func": lambda df, items: final_keyword_exclusion(df, items_to_track=items),
+    },
+    6: {
+        "name": "Module 6: Crowded Property",
+        "file": "06_crowded_properties_filtered.csv",
+        "func": lambda df, items: filter_crowded_same_property(
+            df, threshold=4, radius_m=100.0, items_to_track=items
+        ),
+    },
+}
+
+
 def run_pipeline(
     modules_to_run, save_tracking=True, save_drops=True, items_to_track=None
-):  # <--- ADDED save_drops
+):
     start_time = time.time()
 
     logging.info(
@@ -38,7 +100,6 @@ def run_pipeline(
     print("=" * 50)
     print(f"🚀 STARTING PIPELINE FOR COUNTRY: {ACTIVE_COUNTRY.upper()}")
     print("=" * 50)
-
     print(f"📁 Input file: {INPUT_FILE}")
     print(f"📁 Output file: {OUTPUT_FILE}\n")
 
@@ -52,189 +113,41 @@ def run_pipeline(
     logging.info(f"Initial records: {len(current_df)}")
 
     # ==========================================
-    # Module 1: Normalization
+    # Dynamic Module Execution
     # ==========================================
-    if 1 in modules_to_run:
-        logging.info("Executing Module 1: Normalization...")
+    for mod_id in modules_to_run:
+        if mod_id not in PIPELINE_STEPS:
+            continue
+
+        step = PIPELINE_STEPS[mod_id]
+        logging.info(f"Executing {step['name']}...")
+
         prev_df = current_df
 
-        current_df = deduplicate_records(
-            df=normalize_names(current_df),
-            subset=["name_normalized", "latitude", "longitude"],
+        # Execute the module-specific function
+        current_df, items_to_track, mod_report = step["func"](
+            current_df, items_to_track
         )
 
-        report_metrics.append(
-            analyze_step_drop(prev_df, current_df, "Module 1: Normalization")
-        )
-        filename_mod1 = "01_normalized_deduped.csv"
-
-        if save_tracking:
-            current_df.write_csv(
-                DATA_DIR / "processed" / filename_mod1, include_bom=True
-            )
-
-        # NEW LINE: Save dropped records
-        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod1, save_drops)
-
-        log_row_reduction(prev_df, current_df, "Module 1")
-
-    # ==========================================
-    # Module 2: Chain filter
-    # ==========================================
-    if 2 in modules_to_run:
-        logging.info("Executing Module 2: Chain removal...")
-        prev_df = current_df
-
-        current_df, items_to_track, mod_report = filter_chains_and_duplicates(
-            df=current_df,
-            filter_duplicates=False,
-            max_appearances=4,
-            items_to_track=items_to_track,
-        )
-
-        if mod_report:
-            write_audit_step(audit_file, "MODULE 2 (Chain Filter)", mod_report)
-
-        report_metrics.append(
-            analyze_step_drop(prev_df, current_df, "Module 2: Chain Filter")
-        )
-        filename_mod2 = "02_chains_filtered.csv"
-
-        if save_tracking:
-            current_df.write_csv(
-                DATA_DIR / "processed" / filename_mod2, include_bom=True
-            )
-
-        # NEW LINE: Save dropped records
-        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod2, save_drops)
-
-        log_row_reduction(prev_df, current_df, "Module 2")
-
-    # ==========================================
-    # Module 3: Geo Deduplication
-    # ==========================================
-    if 3 in modules_to_run:
-        logging.info("Executing Module 3: BallTree Deduplication...")
-        prev_df = current_df
-
-        current_df, items_to_track, mod_report = balltree_spatial_deduplication(
-            current_df, radius_meters=50, items_to_track=items_to_track
-        )
-
-        if mod_report:
-            write_audit_step(audit_file, "MODULE 3 (BallTree Filter)", mod_report)
-
-        report_metrics.append(
-            analyze_step_drop(prev_df, current_df, "Module 3: BallTree Dedup")
-        )
-        filename_mod3 = "03_geo_balltree_deduped.csv"
-
-        if save_tracking:
-            current_df.write_csv(
-                DATA_DIR / "processed" / filename_mod3, include_bom=True
-            )
-
-        # NEW LINE: Save dropped records
-        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod3, save_drops)
-
-        log_row_reduction(prev_df, current_df, "Module 3")
-
-    # ==========================================
-    # Module 4: Hours and Fuzzy
-    # ==========================================
-    if 4 in modules_to_run:
-        logging.info("Executing Module 4: Hours and Fuzzy Deduplication...")
-        prev_df = current_df
-
-        current_df, items_to_track, mod_report = apply_hours_and_fuzzy_filters(
-            current_df,
-            min_hours=20,
-            night_start=19,
-            fuzzy_thresh=80,
-            dist_m=100,
-            items_to_track=items_to_track,
-        )
-
+        # Centralized reporting and saving logic
         if mod_report:
             write_audit_step(
-                audit_file, "MODULE 4 (Hours and Fuzzy Filter)", mod_report
+                audit_file, f"MODULE {mod_id} ({step['name']})", mod_report
             )
 
-        report_metrics.append(
-            analyze_step_drop(prev_df, current_df, "Module 4: Hours & Fuzzy")
-        )
-        filename_mod4 = "04_hours_fuzzy_filtered.csv"
+        report_metrics.append(analyze_step_drop(prev_df, current_df, step["name"]))
 
         if save_tracking:
             current_df.write_csv(
-                DATA_DIR / "processed" / filename_mod4, include_bom=True
+                DATA_DIR / "processed" / step["file"], include_bom=True
             )
 
-        # NEW LINE: Save dropped records
-        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod4, save_drops)
-
-        log_row_reduction(prev_df, current_df, "Module 4")
+        save_dropped_records(prev_df, current_df, DATA_DIR, step["file"], save_drops)
+        log_row_reduction(prev_df, current_df, f"Module {mod_id}")
 
     # ==========================================
-    # Module 5: Final Regex
+    # Closing and Final Reports
     # ==========================================
-    if 5 in modules_to_run:
-        logging.info("Executing Module 5: Final exclusion via external regex...")
-        prev_df = current_df
-
-        current_df, items_to_track, mod_report = final_keyword_exclusion(
-            current_df, items_to_track=items_to_track
-        )
-
-        if mod_report:
-            write_audit_step(audit_file, "MODULE 5 (Regex Filter)", mod_report)
-
-        report_metrics.append(
-            analyze_step_drop(prev_df, current_df, "Module 5: Final Regex")
-        )
-        filename_mod5 = "05_external_regex_excluded.csv"
-
-        if save_tracking:
-            current_df.write_csv(
-                DATA_DIR / "processed" / filename_mod5, include_bom=True
-            )
-
-        # NEW LINE: Save dropped records
-        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod5, save_drops)
-
-        log_row_reduction(prev_df, current_df, "Module 5")
-
-    # Module 6: Crowded Same Property Filter
-    if 6 in modules_to_run:
-        logging.info("Executing Module 6: Crowded Same Property Filter...")
-        prev_df = current_df
-
-        # Default threshold=4 and radius_m=100 as per the notebook settings
-        current_df, items_to_track, mod_report = filter_crowded_same_property(
-            current_df, threshold=4, radius_m=100.0, items_to_track=items_to_track
-        )
-
-        if mod_report:
-            write_audit_step(
-                audit_file, "MODULE 6 (Crowded Property Filter)", mod_report
-            )
-
-        report_metrics.append(
-            analyze_step_drop(prev_df, current_df, "Module 6: Crowded Property")
-        )
-        filename_mod6 = "06_crowded_properties_filtered.csv"
-
-        if save_tracking:
-            current_df.write_csv(
-                DATA_DIR / "processed" / filename_mod6, include_bom=True
-            )
-
-        # Save dropped records using your drop tracker
-        save_dropped_records(prev_df, current_df, DATA_DIR, filename_mod6, save_drops)
-
-        log_row_reduction(prev_df, current_df, "Module 6")
-
-    # --- CLOSING & REPORTS ---
     finalize_audit_report(audit_file, current_df, items_to_track)
 
     if report_metrics:
@@ -251,10 +164,9 @@ if __name__ == "__main__":
     modules_to_run = [1, 2, 3, 4, 5, 6]
 
     # --- BOOLEANS TO CONTROL THE FLOW ---
-    save_intermediate_csvs = False
+    save_intermediate_csvs = True
     save_dropped_csvs = True
-
-    track_these_elements = []
+    track_these_elements = ["CLUB DE NUTRICION HERBALIFE"]
 
     run_pipeline(
         modules_to_run=modules_to_run,
