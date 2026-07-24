@@ -220,3 +220,6 @@ __marimo__/
 data_cleaning/uv.lock
 *.txt
 *.html
+*.parquet
+*.ipynb
+*.geojson
