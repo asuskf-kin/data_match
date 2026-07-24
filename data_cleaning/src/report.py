@@ -1,41 +1,45 @@
-import polars as pl
-from pathlib import Path
-import time
 import logging
+import time
+from pathlib import Path
 
-def analyze_step_drop(df_before: pl.DataFrame, df_after: pl.DataFrame, step_name: str) -> dict:
+import polars as pl
+
+
+def analyze_step_drop(
+    df_before: pl.DataFrame, df_after: pl.DataFrame, step_name: str
+) -> dict:
     """
-    Compares the DataFrame before and after a module to extract metrics 
+    Compares the DataFrame before and after a module to extract metrics
     and the Top 5 most frequent dropped records dynamically based on available columns.
     """
     count_before = len(df_before)
     count_after = len(df_after)
     dropped_count = count_before - count_after
-    
+
     top_dropped = []
     if dropped_count > 0:
-        # Detectar dinámicamente qué columna de nombre/identificador existe
+        # Dynamically detect which name/identifier column exists
         name_col = None
         for col in ["name_normalized", "name", "business_name", "title"]:
             if col in df_before.columns:
                 name_col = col
                 break
-        
-        # Construir las llaves de cruce basándose en columnas comunes existentes
+
+        # Build join keys based on existing common columns
         join_keys = []
         if name_col and name_col in df_after.columns:
             join_keys.append(name_col)
         for c in ["latitude", "longitude", "id", "place_id"]:
             if c in df_before.columns and c in df_after.columns:
                 join_keys.append(c)
-        
+
         if join_keys:
-            # Usar anti-join para aislar exactamente las filas eliminadas
+            # Use anti-join to isolate the exact dropped rows
             dropped_df = df_before.join(df_after, on=join_keys, how="anti")
         else:
-            # Si no hay llaves de cruce claras, el reporte de diferencias se omite de forma segura
+            # If no clear join keys exist, safely skip the difference report
             dropped_df = pl.DataFrame()
-        
+
         if len(dropped_df) > 0 and name_col and name_col in dropped_df.columns:
             top_counts = (
                 dropped_df.group_by(name_col)
@@ -45,29 +49,30 @@ def analyze_step_drop(df_before: pl.DataFrame, df_after: pl.DataFrame, step_name
             )
             top_dropped = [(row[0], row[1]) for row in top_counts.iter_rows()]
         elif len(dropped_df) > 0:
-            top_dropped = [("Registros sin columna de nombre detectada", len(dropped_df))]
-                
+            top_dropped = [("Records without a detected name column", len(dropped_df))]
+
     return {
         "step_name": step_name,
         "dropped_count": dropped_count,
         "remaining_count": count_after,
-        "top_dropped": top_dropped
+        "top_dropped": top_dropped,
     }
+
 
 def generate_html_report(metrics_list: list[dict], data_dir: Path) -> Path:
     """
-    Generates an interactive HTML file with a bar chart (Chart.js) 
+    Generates an interactive HTML file with a bar chart (Chart.js)
     showing filtered records per step and the Top 5 discarded items.
     """
     reports_dir = data_dir.parent / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     html_file = reports_dir / f"pipeline_report_{timestamp}.html"
-    
+
     steps_labels = [m["step_name"] for m in metrics_list]
     dropped_data = [m["dropped_count"] for m in metrics_list]
-    
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -81,8 +86,9 @@ def generate_html_report(metrics_list: list[dict], data_dir: Path) -> Path:
         .chart-container {{ position: relative; height: 400px; width: 100%; margin-top: 20px; }}
         .step-card {{ background: #fdfdfd; border-left: 4px solid #3498db; padding: 15px; margin: 15px 0; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }}
         .step-title {{ font-weight: bold; color: #2980b9; font-size: 1.1em; }}
-        ul {{ margin: 5px 0; padding-left: 20px; }}
-        li {{ font-size: 0.9em; color: #555; }}
+        ul {{ margin: 5px 0; padding-left: 20px; list-style-type: none; }}
+        li {{ font-size: 0.95em; color: #444; margin-bottom: 4px; }}
+        .count-badge {{ background-color: #e74c3c; color: white; padding: 2px 8px; border-radius: 12px; font-weight: bold; font-size: 0.85em; margin-right: 8px; display: inline-block; min-width: 20px; text-align: center; }}
     </style>
 </head>
 <body>
@@ -106,7 +112,8 @@ def generate_html_report(metrics_list: list[dict], data_dir: Path) -> Path:
         if m["top_dropped"]:
             html_content += "<ul>"
             for name, freq in m["top_dropped"]:
-                html_content += f"<li><code>{name}</code> ({freq} times)</li>"
+                # Replaced "({freq} times)" with a clean numerical badge and format
+                html_content += f"<li><span class='count-badge'>{freq}</span> <code>{name}</code></li>"
             html_content += "</ul>"
         else:
             html_content += "<p style='color: #888; font-size: 0.9em;'>No prominent exclusions recorded.</p>"
@@ -144,6 +151,6 @@ def generate_html_report(metrics_list: list[dict], data_dir: Path) -> Path:
 
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
-        
+
     logging.info(f"Interactive HTML report generated at: {html_file}")
     return html_file
