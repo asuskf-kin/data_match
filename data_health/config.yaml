@@ -1,0 +1,57 @@
+# Configuration for Data Health Diagnostic Pipeline
+paths:
+  raw_file: "data/raw/part-00000-e8bf5a9d-af4f-4d1d-890c-cc4422d50c68-c000.snappy.parquet"
+  reports_dir: "reports/data_health"
+  geojson_boundaries: "data/raw/Arca_territorio_por_estado.geojson"  # NEW: Path to your GeoJSON file
+
+parameters:
+  min_weekly_hours: 20
+  night_start: 19
+  low_quality_cut: 0.70
+
+
+columns:
+  base_columns:
+    - "dataplor_id"
+    - "country"
+    - "data_quality_confidence_score"
+  day_prefixes:
+    - "monday"
+    - "tuesday"
+    - "wednesday"
+    - "thursday"
+    - "friday"
+    - "saturday"
+    - "sunday"
+  key_columns:
+    - "name"
+    - "latitude"
+    - "longitude"
+    - "main_category"
+
+constants:
+  bad_hours:
+    - "Not available"
+    - ""
+    - "nan"
+    - "00:00-00:00"
+
+exclude_keywords:
+  - "taller"
+  - "funeraria"
+  - "cancha"
+  - "mcdonalds"
+  - "kfc"
+constants:
+  bad_hours:
+    - "Not available"
+    - ""
+    - "nan"
+    - "00:00-00:00"
+
+exclude_keywords:
+  - "taller"
+  - "funeraria"
+  - "cancha"
+  - "mcdonalds"
+  - "kfc"
