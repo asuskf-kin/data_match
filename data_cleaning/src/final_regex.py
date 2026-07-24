@@ -11,14 +11,14 @@ def final_keyword_exclusion(
     df: pl.DataFrame,
     items_to_track: list[str] = None,
 ) -> tuple[pl.DataFrame, list[str] | None, str | None]:
-    """Filters businesses based on an external keywords CSV file, using Regular Expressions while respecting a whitelist (KEEP_WORDS).
+    """Filters businesses using the FINAL_KEYWORD_EXCLUDE_KEYWORDS list from
+    config/global_exclude.py, applying Regular Expressions while respecting a
+    whitelist (KEEP_WORDS).
 
     Parameters
     ----------
     df : pl.DataFrame
         The input Polars DataFrame containing business data (must have a 'name' column).
-    keywords_csv_path : str
-        The file path to the CSV containing the exclusion keywords.
     items_to_track : list[str], optional
         List of specific strings to trace for auditing purposes.
 
@@ -33,7 +33,7 @@ def final_keyword_exclusion(
     """
     is_auditing = items_to_track is not None and len(items_to_track) > 0
 
-    # 1. Read external keywords
+    # 1. Load exclusion keywords from config
     keywords = FINAL_KEYWORD_EXCLUDE_KEYWORDS
     if df.is_empty() or not keywords:
         return df, items_to_track, None
