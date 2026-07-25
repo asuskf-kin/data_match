@@ -1,3 +1,4 @@
+# src/utils.py
 import gc
 import time
 from pathlib import Path
@@ -12,16 +13,13 @@ MINOR_ISSUES = ["few_hours", "night_only", "low_quality"]
 
 
 def load_raw_data(file_path, columns=None):
-    """
-    Loads the raw Parquet dataset into a Polars DataFrame, selecting only specific columns.
-    """
+    """Loads the raw Parquet dataset into a Polars DataFrame, selecting only specific columns."""
     print(f"Loading file: {file_path}...")
     try:
         if columns:
             print(
                 f" -> Optimization: Selectively loading only {len(columns)} necessary columns..."
             )
-            # Polars native column selection during read is highly optimized for Parquet
             df = pl.read_parquet(file_path, columns=columns)
         else:
             df = pl.read_parquet(file_path)
@@ -34,8 +32,8 @@ def load_raw_data(file_path, columns=None):
 
 
 def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
-    """
-    Executes diagnostic checks sequentially, saving intermediate states to disk
+    """Executes diagnostic checks sequentially, saving intermediate states to disk
+
     and freeing memory after each step to handle massive datasets safely.
     """
     print("Running diagnostics...")
@@ -81,10 +79,12 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
         gc.collect()
 
         # ---------------------------------------------------------
-        # STEP 2: GeoJSON Spatial Outliers
+        # STEP 2: GeoJSON Spatial Outliers & Territorial Mapping
         # ---------------------------------------------------------
         print(" -> [Step 2/5] Running GeoJSON spatial outlier check...")
-        geo_outlier_series = diagnostics.get_geo_outlier_series(df, geojson_path)
+        geo_outlier_series = diagnostics.get_geo_outlier_series(
+            df, geojson_path, config=config
+        )
 
         step2_df = df.select([pk]).with_columns(geo_outlier_series)
         step2_path = temp_dir / "step2_geo.parquet"
@@ -129,8 +129,6 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
         # ---------------------------------------------------------
         print(" -> [Step 4/5] Processing complex schedules and active hours...")
 
-        # FACTORY FUNCTIONS: These guarantee that the loop variable 'd'
-        # is strictly isolated and frozen for each day, preventing KeyError.
         def make_dur_mapper(day_name, bad_h):
             def mapper(x):
                 return parse_split_hours_duration(
@@ -145,7 +143,6 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
 
             return mapper
 
-        # Apply the factory functions to build the expressions safely
         dur_exprs = [
             pl.struct([f"{d}_open", f"{d}_close"])
             .map_elements(make_dur_mapper(d, bad_hours), return_dtype=pl.Float64)
@@ -160,7 +157,6 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
             for d in day_prefixes
         ]
 
-        # Isolate only the columns needed to calculate schedules to save RAM
         sched_cols = (
             [pk]
             + [f"{d}_open" for d in day_prefixes]
@@ -211,7 +207,6 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
         # ---------------------------------------------------------
         print(" -> [Step 5/5] Consolidating intermediate files lazily...")
 
-        # Scan Parquet creates a lazy computational graph (Zero RAM used here)
         lf1 = pl.scan_parquet(step1_path)
         lf2 = pl.scan_parquet(step2_path)
         lf3 = pl.scan_parquet(step3_path)
@@ -245,7 +240,6 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
             ]
         )
 
-        # Execute the graph and join it back to the original dataframe
         print("    -> Executing joins and returning final dataframe...")
         collected_flags = final_flags_lf.collect()
         final_df = df.join(collected_flags, on=pk, how="left")
@@ -253,7 +247,6 @@ def run_diagnostics_pipeline(df: pl.DataFrame, config: dict):
         return final_df, severe_issues, MINOR_ISSUES
 
     finally:
-        # --- GUARANTEED MEMORY CLEANUP ---
         print(" -> [Cleanup] Forcing final garbage collection...")
         gc.collect()
         elapsed_time = time.time() - start_time

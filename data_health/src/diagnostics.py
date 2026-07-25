@@ -1,7 +1,9 @@
+import json
 import re
 
-import geopandas as gpd
 import polars as pl
+from shapely.geometry import Point, shape
+from shapely.strtree import STRtree
 from unidecode import unidecode
 
 
@@ -44,76 +46,157 @@ def get_quality_expr(columns, low_quality_cut):
     return pl.lit(False).alias("low_quality")
 
 
-def get_geo_outlier_series(df: pl.DataFrame, geojson_path) -> pl.Series:
+def get_geo_outlier_series(
+    df: pl.DataFrame, geojson_path: str, config: dict = None
+) -> list[pl.Series]:
+    """Evaluates latitude and longitude against boundaries in GeoJSON using Shapely STRtree in batches.
+
+    Returns a list of Polars Series:
+      - 'geo_outlier': Boolean (True if outside all boundaries)
+      - 'state': String (State name or None)
+      - 'bottler': String (Bottler name or None)
+      - 'municipality': String (Municipality name or None)
     """
-    Identifies spatial outliers in a highly optimized way by extracting unique coordinates.
-    """
-    print(f"Evaluating spatial outliers using: {geojson_path.name}...")
+    print("\n[Geo-Spatial] Starting batched spatial evaluation...")
+    print(f"[Geo-Spatial] GeoJSON path: {geojson_path}")
+    print(f"[Geo-Spatial] Total rows to evaluate in DataFrame: {df.height:,}")
 
-    # OPTIMIZATION: Extract only unique coordinates to minimize spatial join workload
-    # We strictly select only country, latitude, and longitude as requested.
-    unique_coords = (
-        df.select(["country", "latitude", "longitude"])
-        .with_columns(
-            [
-                pl.col("latitude").cast(pl.Float64, strict=False),
-                pl.col("longitude").cast(pl.Float64, strict=False),
-            ]
-        )
-        .drop_nulls(subset=["latitude", "longitude"])
-        .unique(subset=["latitude", "longitude"])
-    )
-
-    pdf = unique_coords.to_pandas()
-
-    if pdf.empty:
-        return pl.Series("geo_outlier", [False] * df.height)
-
-    # Create GeoDataFrame for the unique points
-    gdf_points = gpd.GeoDataFrame(
-        pdf,
-        geometry=gpd.points_from_xy(pdf["longitude"], pdf["latitude"]),
-        crs="EPSG:4326",
-    )
-
-    # Load boundaries from GeoJSON
+    # 1. Load GeoJSON
     try:
-        gdf_poly = gpd.read_file(geojson_path)
-        if gdf_poly.crs is None:
-            gdf_poly.set_crs("EPSG:4326", inplace=True)
-        else:
-            gdf_poly = gdf_poly.to_crs("EPSG:4326")
+        with open(geojson_path, "r", encoding="utf-8") as f:
+            geo_data = json.load(f)
+        print("[Geo-Spatial] ✅ GeoJSON file loaded successfully.")
     except Exception as e:
+        print(f"    [Error] Could not load GeoJSON file at {geojson_path}: {e}")
+        return [
+            pl.Series("geo_outlier", [False] * df.height, dtype=pl.Boolean),
+            pl.Series("state", [None] * df.height, dtype=pl.String),
+            pl.Series("bottler", [None] * df.height, dtype=pl.String),
+            pl.Series("municipality", [None] * df.height, dtype=pl.String),
+        ]
+
+    # 2. Extract geometries and metadata
+    geometries = []
+    states = []
+    bottlers = []
+    municipalities = []
+
+    for feature in geo_data.get("features", []):
+        geometries.append(shape(feature["geometry"]))
+        props = feature.get("properties", {})
+
+        states.append(props.get("estado", "Unknown"))
+        bottlers.append(props.get("embotelladora", "Unknown"))
+        municipalities.append(props.get("municipio", "Unknown"))
+
+    print(f"[Geo-Spatial] Extracted {len(geometries):,} geometries from GeoJSON.")
+
+    # 3. Create Spatial Index
+    tree = STRtree(geometries)
+    print("[Geo-Spatial] STRtree spatial index created successfully.")
+
+    # 4. Batched spatial evaluation (Leyendo batch_size de config)
+    if config and "parameters" in config and "batch_size" in config["parameters"]:
+        batch_size = config["parameters"]["batch_size"]
+
+    print(f"[Geo-Spatial] Processing rows in batches (batch_size: {batch_size:,})...")
+    n_rows = df.height
+
+    out_geo_outlier = [False] * n_rows
+    out_state = [None] * n_rows
+    out_bottler = [None] * n_rows
+    out_municipality = [None] * n_rows
+
+    lat_col = df.get_column("latitude").to_numpy()
+    lon_col = df.get_column("longitude").to_numpy()
+    total_batches = (n_rows + batch_size - 1) // batch_size
+    current_batch = 0
+
+    for start_idx in range(0, n_rows, batch_size):
+        current_batch += 1
+        end_idx = min(start_idx + batch_size, n_rows)
+        batch_count = end_idx - start_idx
         print(
-            f"Warning: Could not load GeoJSON ({e}). Defaulting geo_outlier to False."
+            f"[Geo-Spatial] Processing batch {current_batch}/{total_batches} -> rows {start_idx:,} to {end_idx:,} (Batch size: {batch_count:,})..."
         )
-        return pl.Series("geo_outlier", [False] * df.height)
 
-    # Perform the spatial join ONLY on unique points
-    joined = gpd.sjoin(gdf_points, gdf_poly, how="left", predicate="within")
+        lats = lat_col[start_idx:end_idx]
+        lons = lon_col[start_idx:end_idx]
 
-    # If the matched polygon index (index_right) is NaN, it fell outside the boundaries
-    is_outlier = joined["index_right"].isna()
+        for i in range(len(lats)):
+            global_idx = start_idx + i
+            lat = lats[i]
+            lon = lons[i]
 
-    # Create a mapping dataframe
-    outlier_mapping = pl.DataFrame(
+            # Tu lógica original exacta de validación y control
+            if lat is None or lon is None:
+                continue
+
+            try:
+                pt = Point(float(lon), float(lat))
+                indices = tree.query(pt)
+
+                matched = False
+                for idx in indices:
+                    if geometries[idx].contains(pt):
+                        out_state[global_idx] = states[idx]
+                        out_bottler[global_idx] = bottlers[idx]
+                        out_municipality[global_idx] = municipalities[idx]
+                        out_geo_outlier[global_idx] = False
+                        matched = True
+                        break
+
+                if not matched:
+                    out_state[global_idx] = "Outlier"
+                    out_bottler[global_idx] = "None"
+                    out_municipality[global_idx] = "None"
+                    out_geo_outlier[global_idx] = True
+            except Exception:
+                out_state[global_idx] = None
+                out_bottler[global_idx] = None
+                out_municipality[global_idx] = None
+                out_geo_outlier[global_idx] = True
+
+    print("[Geo-Spatial] Batched spatial mapping completed.")
+
+    # 5. Summary Output
+    temp_df = pl.DataFrame(
         {
-            "latitude": pdf["latitude"].values,
-            "longitude": pdf["longitude"].values,
-            "geo_outlier": is_outlier.values,
+            "state": out_state,
+            "bottler": out_bottler,
+            "municipality": out_municipality,
+            "geo_outlier": out_geo_outlier,
         }
     )
 
-    # Join the evaluated outliers back to the main dataframe
-    df_coords = df.select(
-        [
-            pl.col("latitude").cast(pl.Float64, strict=False),
-            pl.col("longitude").cast(pl.Float64, strict=False),
-        ]
-    )
+    outliers_count = temp_df.get_column("geo_outlier").sum()
+    retained_df = temp_df.filter(~pl.col("geo_outlier") & pl.col("state").is_not_null())
 
-    mapped_results = df_coords.join(
-        outlier_mapping, on=["latitude", "longitude"], how="left"
-    )
+    print("\n    =============================================")
+    print("    📊 SPATIAL EVALUATION SUMMARY")
+    print("    =============================================")
+    print(f"    Total Evaluated Points: {df.height:,}")
+    print(f"    ❌ Spatial Outliers (Outside area): {outliers_count:,}")
+    print(f"    ✅ Retained Points (Inside area): {retained_df.height:,}")
 
-    return mapped_results.get_column("geo_outlier").fill_null(False)
+    if retained_df.height > 0:
+        summary = (
+            retained_df.group_by(["state", "bottler", "municipality"])
+            .agg(pl.len().alias("count"))
+            .sort("count", descending=True)
+        )
+        print("    ---------------------------------------------")
+        print("    Distribution of Retained Points:")
+        for row in summary.iter_rows():
+            print(
+                f"      -> State: {row[0]} | Bottler: {row[1]} | Municipality: {row[2]} | Points: {row[3]:,}"
+            )
+    print("    =============================================\n")
+
+    # 6. Return as list of Polars Series
+    return [
+        pl.Series("geo_outlier", out_geo_outlier, dtype=pl.Boolean),
+        pl.Series("state", out_state, dtype=pl.String),
+        pl.Series("bottler", out_bottler, dtype=pl.String),
+        pl.Series("municipality", out_municipality, dtype=pl.String),
+    ]

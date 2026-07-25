@@ -8,4 +8,6 @@ dependencies = [
     "geopandas>=1.1.4",
     "pyarrow>=25.0.0",
     "pyyaml>=6.0.3",
+    "shapely>=2.1.2",
+    "tqdm>=4.69.1",
 ]

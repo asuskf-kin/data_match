@@ -8,7 +8,8 @@ parameters:
   min_weekly_hours: 20
   night_start: 19
   low_quality_cut: 0.70
-
+  batch_size: 200000
+  top_bottlers_limit: 5
 
 columns:
   base_columns:

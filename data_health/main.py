@@ -29,7 +29,7 @@ def main():
     # 1. Extract (Optimized - Only loads columns strictly needed for diagnostics)
     df = load_raw_data(file_path=config["paths"]["raw_file"], columns=required_columns)
 
-    # 2. Transform (Process Diagnostics)
+    # 2. Transform (Process Diagnostics - Solo pasa df y config)
     flags_df, severe_issues, minor_issues = run_diagnostics_pipeline(
         df=df, config=config
     )

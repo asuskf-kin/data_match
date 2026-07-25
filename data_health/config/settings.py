@@ -2,18 +2,11 @@ from pathlib import Path
 
 import yaml
 
-# Main project base directory (points to data_health/)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_config():
-    """
-    Loads the YAML configuration file and resolves paths.
-
-    Returns:
-        dict: The complete configuration dictionary.
-    """
-    # UPDATED: Now looking for config.yaml directly in the root directory
+    """Loads the YAML configuration file and resolves paths."""
     config_path = BASE_DIR / "config.yaml"
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -26,7 +19,18 @@ def load_config():
         BASE_DIR / config["paths"]["geojson_boundaries"]
     )
 
-    # Convert bad_hours list to a set for O(1) lookup performance
-    config["constants"]["bad_hours"] = set(config["constants"]["bad_hours"])
+    # Convert collections if needed
+    if "bad_hours" in config.get("constants", {}):
+        config["constants"]["bad_hours"] = set(config["constants"]["bad_hours"])
+
+    # Ensure default values for parameters if not defined in YAML
+    if "parameters" not in config:
+        config["parameters"] = {}
+
+    if "batch_size" not in config["parameters"]:
+        config["parameters"]["batch_size"] = 50000  # Default security value
+
+    if "top_bottlers_limit" not in config["parameters"]:
+        config["parameters"]["top_bottlers_limit"] = 5  # Default value for Top limit
 
     return config

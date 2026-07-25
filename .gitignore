@@ -223,3 +223,4 @@ data_cleaning/uv.lock
 *.parquet
 *.ipynb
 *.geojson
+*.lock
