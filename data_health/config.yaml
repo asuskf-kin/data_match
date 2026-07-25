@@ -8,8 +8,9 @@ parameters:
   min_weekly_hours: 20
   night_start: 19
   low_quality_cut: 0.70
-  batch_size: 200000
+  batch_size: 100000
   top_bottlers_limit: 5
+  analyze_state: true
 
 columns:
   base_columns:
@@ -30,19 +31,6 @@ columns:
     - "longitude"
     - "main_category"
 
-constants:
-  bad_hours:
-    - "Not available"
-    - ""
-    - "nan"
-    - "00:00-00:00"
-
-exclude_keywords:
-  - "taller"
-  - "funeraria"
-  - "cancha"
-  - "mcdonalds"
-  - "kfc"
 constants:
   bad_hours:
     - "Not available"
