@@ -59,38 +59,48 @@ def get_geo_outlier_series(
     Evaluates latitude and longitude against boundaries in GeoJSON.
     """
     params = config.get("parameters", {}) if config else {}
-    analyze_municipality = params.get("analyze_state", False)
+    analyze_state = params.get("analyze_state", True)
+    analyze_municipality = params.get("analyze_municipality", False)
+
     print("\n[Geo-Spatial] Starting batched spatial evaluation...")
     print(f"[Geo-Spatial] GeoJSON path: {geojson_path}")
     print(f"[Geo-Spatial] Total rows to evaluate: {df.height:,}")
+    print(f"[Geo-Spatial] State analysis active: {analyze_state}")
     print(f"[Geo-Spatial] Municipality analysis active: {analyze_municipality}")
 
     try:
+        # Call to public function
         geometries, states, bottlers, municipalities = load_geojson_features(
-            geojson_path, analyze_municipality
+            geojson_path, analyze_state, analyze_municipality
         )
         print(f"[Geo-Spatial] ✅ Extracted {len(geometries):,} geometries.")
     except Exception as e:
         print(f"    [Error] Could not load GeoJSON file at {geojson_path}: {e}")
+
+        # Base error series
         error_series = [
             pl.Series("geo_outlier", [False] * df.height, dtype=pl.Boolean),
-            pl.Series("state", [None] * df.height, dtype=pl.String),
             pl.Series("bottler", [None] * df.height, dtype=pl.String),
         ]
+
+        if analyze_state:
+            error_series.insert(
+                1, pl.Series("state", [None] * df.height, dtype=pl.String)
+            )
         if analyze_municipality:
             error_series.append(
                 pl.Series("municipality", [None] * df.height, dtype=pl.String)
             )
+
         return error_series
 
     tree = STRtree(geometries)
     print("[Geo-Spatial] STRtree spatial index created successfully.")
 
-    batch_size = (
-        config.get("parameters", {}).get("batch_size", 100000) if config else 100000
-    )
+    batch_size = params.get("batch_size", 100000)
     print(f"[Geo-Spatial] Processing in batches (batch_size: {batch_size:,})...")
 
+    # Call to public function
     out_geo_outlier, out_state, out_bottler, out_municipality = process_spatial_batches(
         df,
         geometries,
@@ -99,24 +109,31 @@ def get_geo_outlier_series(
         municipalities,
         tree,
         batch_size,
+        analyze_state,
         analyze_municipality,
     )
     print("[Geo-Spatial] Batched spatial mapping completed.")
 
+    # Call to public function
     print_spatial_summary(
         out_state,
         out_bottler,
         out_geo_outlier,
         out_municipality,
         df.height,
+        analyze_state,
         analyze_municipality,
     )
 
+    # Base result series
     result_series = [
         pl.Series("geo_outlier", out_geo_outlier, dtype=pl.Boolean),
-        pl.Series("state", out_state, dtype=pl.String),
         pl.Series("bottler", out_bottler, dtype=pl.String),
     ]
+
+    # Dynamically inject toggled columns
+    if analyze_state:
+        result_series.insert(1, pl.Series("state", out_state, dtype=pl.String))
     if analyze_municipality:
         result_series.append(
             pl.Series("municipality", out_municipality, dtype=pl.String)

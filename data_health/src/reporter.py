@@ -18,18 +18,35 @@ def analyze_issue_impact(df: pl.DataFrame, issue_name: str, total_count: int) ->
 
     if flagged_count > 0:
         # 1. Prioritize geographic grouping if analyzing geo issues
-        if "geo" in issue_name.lower() and "municipality" in issue_df.columns:
-            top_counts = (
-                issue_df.group_by(["municipality", "state"])
-                .agg(pl.len().alias("freq"))
-                .sort("freq", descending=True)
-                .head(5)
-            )
-            top_dropped = [
-                (f"Municipio: {row[0]} | Estado: {row[1]}", row[2])
-                for row in top_counts.iter_rows()
-            ]
+        if "geo" in issue_name.lower():
+            geo_cols = []
+            if "state" in issue_df.columns:
+                geo_cols.append("state")
+            if "municipality" in issue_df.columns:
+                geo_cols.append("municipality")
 
+            # If we have geographic columns to group by
+            if geo_cols:
+                top_counts = (
+                    issue_df.group_by(geo_cols)
+                    .agg(pl.len().alias("freq"))
+                    .sort("freq", descending=True)
+                    .head(5)
+                )
+
+                # Format dynamically based on existing columns
+                for row in top_counts.iter_rows():
+                    freq = row[-1]  # Last element is the count
+                    labels = [
+                        f"{col.title()}: {val}" for col, val in zip(geo_cols, row[:-1])
+                    ]
+                    top_dropped.append((" | ".join(labels), freq))
+            else:
+                top_dropped = [
+                    ("Geographic outlier (no detailed columns enabled)", flagged_count)
+                ]
+
+            # Calculate top bottlers per state (only if both exist)
             if "bottler" in issue_df.columns and "state" in issue_df.columns:
                 bottler_counts = (
                     df.filter(
@@ -92,10 +109,19 @@ def generate_html_report(
     dropped_data = [m["dropped_count"] for m in metrics_list]
     usable_pct = (usable_count / total_records * 100) if total_records > 0 else 0
 
-    # Format the spatial distribution lines
+    # Format the spatial distribution lines dynamically
     dist_html = ""
     for row in spatial_summary.get("distribution", []):
-        dist_html += f"<div style='padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.1);'>➔ State: {row['state']} | Bottler: {row['bottler']} | Municipality: {row['municipality']} | <strong style='color: #a29bfe;'>Points: {row['count']:,}</strong></div>"
+        parts = []
+        if "state" in row:
+            parts.append(f"State: {row['state']}")
+        if "bottler" in row:
+            parts.append(f"Bottler: {row['bottler']}")
+        if "municipality" in row:
+            parts.append(f"Municipality: {row['municipality']}")
+
+        row_str = " | ".join(parts)
+        dist_html += f"<div style='padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.1);'>➔ {row_str} | <strong style='color: #a29bfe;'>Points: {row['count']:,}</strong></div>"
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -165,7 +191,7 @@ def generate_html_report(
     for m in metrics_list:
         card_class = "step-card geo-highlight" if m["is_geo"] else "step-card"
         tag = (
-            "<span class='highlight-tag'>Geo / Municipality Impact</span>"
+            "<span class='highlight-tag'>Geo / Spatial Impact</span>"
             if m["is_geo"]
             else ""
         )
@@ -251,25 +277,36 @@ def generate_and_save_reports(
     if "is_usable" in df.columns:
         usable_count = df.select(pl.col("is_usable").sum()).item()
 
-    # 2. Extract Spatial Evaluation Summary for the HTML Banner
+    # 2. Extract Spatial Evaluation Summary for the HTML Banner dynamically
     spatial_summary = {
         "total": total_records,
         "outliers": 0,
         "retained": total_records,
         "distribution": [],
     }
-    if "geo_outlier" in df.columns and "state" in df.columns:
+
+    if "geo_outlier" in df.columns:
         outliers_count = df.select(pl.col("geo_outlier").sum()).item()
-        retained_df = df.filter(~pl.col("geo_outlier") & pl.col("state").is_not_null())
+        retained_df = df.filter(~pl.col("geo_outlier"))
         retained_count = len(retained_df)
 
-        # Group to mimic the distribution printed in terminal
-        distribution = (
-            retained_df.group_by(["state", "bottler", "municipality"])
-            .agg(pl.len().alias("count"))
-            .sort("count", descending=True)
-            .to_dicts()
-        )
+        # Build dynamic group list based on existing columns
+        group_cols = []
+        if "state" in df.columns:
+            group_cols.append("state")
+        if "bottler" in df.columns:
+            group_cols.append("bottler")
+        if "municipality" in df.columns:
+            group_cols.append("municipality")
+
+        distribution = []
+        if group_cols:
+            distribution = (
+                retained_df.group_by(group_cols)
+                .agg(pl.len().alias("count"))
+                .sort("count", descending=True)
+                .to_dicts()
+            )
 
         spatial_summary = {
             "total": total_records,

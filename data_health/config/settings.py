@@ -33,7 +33,10 @@ def load_config():
     if "top_bottlers_limit" not in config["parameters"]:
         config["parameters"]["top_bottlers_limit"] = 5  # Default value for Top limit
 
-    if "analyze_municipality" not in config["parameters"]:
-        config["parameters"]["analyze_state"] = False  # Default value for Top limit
+    if "analyze_state" not in config["parameters"]:
+        config["parameters"]["analyze_state"] = False
+
+    if "analyze_state" not in config["parameters"]:
+        config["parameters"]["analyze_municipality"] = False
 
     return config
