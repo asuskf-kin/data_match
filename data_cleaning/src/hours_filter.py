@@ -78,18 +78,11 @@ def apply_hours_filter_logic(
         ]
     )
 
-    # Fail if night-only, if hours are missing/null, or if weekly hours < min_hours
-    df = df.with_columns(
-        (
-            (pl.col("_is_night_only") == True)
-            | pl.col("_total_weekly_hours").is_null()
-            | (pl.col("_total_weekly_hours") < min_hours)
-        )
-        .not_()
-        .alias("flag_hours")
+    condicion_rechazo = pl.col("_total_weekly_hours").is_not_null() & (
+        (pl.col("_is_night_only") == True) | (pl.col("_total_weekly_hours") < min_hours)
     )
 
-    # Update drop_reason if dropped at hours filter (only if not already dropped)
+    df = df.with_columns((~condicion_rechazo).alias("flag_hours"))
     df = df.with_columns(
         pl.when(pl.col("drop_reason").is_null() & pl.col("flag_hours").not_())
         .then(pl.lit("2_Hours_Filter"))
