@@ -1,4 +1,3 @@
-# src/reporter.py
 import time
 from pathlib import Path
 
@@ -7,14 +6,13 @@ import polars as pl
 
 def analyze_issue_impact(df: pl.DataFrame, issue_name: str, total_count: int) -> dict:
     """Analyzes a specific diagnostic flag to extract metrics and the
-    Top 5 most frequent records or affected areas (including municipalities and bottlers).
+    Top 5 most frequent records or affected areas.
     """
     issue_df = df.filter(pl.col(issue_name) == True)
     flagged_count = len(issue_df)
     remaining_count = total_count - flagged_count
 
     top_dropped = []
-    top_bottlers = []
 
     if flagged_count > 0:
         # 1. Prioritize geographic grouping if analyzing geo issues
@@ -24,7 +22,7 @@ def analyze_issue_impact(df: pl.DataFrame, issue_name: str, total_count: int) ->
                 geo_cols.append("state")
             if "municipality" in issue_df.columns:
                 geo_cols.append("municipality")
-
+            
             # If we have geographic columns to group by
             if geo_cols:
                 top_counts = (
@@ -33,32 +31,15 @@ def analyze_issue_impact(df: pl.DataFrame, issue_name: str, total_count: int) ->
                     .sort("freq", descending=True)
                     .head(5)
                 )
-
+                
                 # Format dynamically based on existing columns
                 for row in top_counts.iter_rows():
                     freq = row[-1]  # Last element is the count
-                    labels = [
-                        f"{col.title()}: {val}" for col, val in zip(geo_cols, row[:-1])
-                    ]
+                    labels = [f"{col.title()}: {val}" for col, val in zip(geo_cols, row[:-1])]
                     top_dropped.append((" | ".join(labels), freq))
             else:
-                top_dropped = [
-                    ("Geographic outlier (no detailed columns enabled)", flagged_count)
-                ]
+                 top_dropped = [("Geographic outlier (no detailed columns enabled)", flagged_count)]
 
-            # Calculate top bottlers per state (only if both exist)
-            if "bottler" in issue_df.columns and "state" in issue_df.columns:
-                bottler_counts = (
-                    df.filter(
-                        pl.col("state").is_not_null() & pl.col("bottler").is_not_null()
-                    )
-                    .unique(["state", "bottler"])
-                    .group_by("state")
-                    .agg(pl.len().alias("unique_bottlers"))
-                    .sort("unique_bottlers", descending=True)
-                    .head(5)
-                )
-                top_bottlers = [(row[0], row[1]) for row in bottler_counts.iter_rows()]
         else:
             # 2. Default name/identifier column check
             name_col = None
@@ -85,7 +66,6 @@ def analyze_issue_impact(df: pl.DataFrame, issue_name: str, total_count: int) ->
         "dropped_count": flagged_count,
         "remaining_count": remaining_count,
         "top_dropped": top_dropped,
-        "top_bottlers": top_bottlers,
         "is_geo": "geo" in issue_name.lower(),
     }
 
@@ -98,8 +78,8 @@ def generate_html_report(
     spatial_summary: dict,
 ) -> Path:
     """
-    Generates an interactive HTML file highlighting critical issues and
-    including a prominent Executive Summary banner at the top.
+    Generates an interactive HTML file highlighting critical issues with
+    a modern dashboard style.
     """
     reports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -109,120 +89,171 @@ def generate_html_report(
     dropped_data = [m["dropped_count"] for m in metrics_list]
     usable_pct = (usable_count / total_records * 100) if total_records > 0 else 0
 
+    # Determinar color de salud
+    health_color = "#2ecc71" if usable_pct >= 80 else "#f1c40f" if usable_pct >= 50 else "#e74c3c"
+
     # Format the spatial distribution lines dynamically
     dist_html = ""
     for row in spatial_summary.get("distribution", []):
         parts = []
         if "state" in row:
-            parts.append(f"State: {row['state']}")
+            parts.append(f"<span style='color:#a29bfe'>State:</span> {row['state']}")
         if "bottler" in row:
-            parts.append(f"Bottler: {row['bottler']}")
+            parts.append(f"<span style='color:#a29bfe'>Bottler:</span> {row['bottler']}")
         if "municipality" in row:
-            parts.append(f"Municipality: {row['municipality']}")
-
+            parts.append(f"<span style='color:#a29bfe'>Mun:</span> {row['municipality']}")
+            
         row_str = " | ".join(parts)
-        dist_html += f"<div style='padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.1);'>➔ {row_str} | <strong style='color: #a29bfe;'>Points: {row['count']:,}</strong></div>"
+        dist_html += f"<div style='padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.95em;'>➔ {row_str} <span style='float:right; font-weight:bold; color: #4cd137;'>{row['count']:,} pts</span></div>"
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Diagnostic Pipeline Report</title>
+    <title>Data Health Diagnostic Report</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8f9fa; color: #333; margin: 0; padding: 20px; }}
-        .container {{ max-width: 1000px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 10px; margin-top: 0; }}
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        
+        body {{ font-family: 'Inter', sans-serif; background-color: #f4f7f6; color: #2c3e50; margin: 0; padding: 20px 0; }}
+        .container {{ max-width: 1100px; margin: auto; padding: 0 20px; }}
+        
+        /* HEADER */
+        .header {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 25px; }}
+        .header h1 {{ margin: 0; font-size: 2.2em; font-weight: 800; color: #1a252f; letter-spacing: -0.5px; }}
+        .header p {{ margin: 0; color: #7f8c8d; font-size: 0.9em; }}
         
         /* EXECUTIVE BANNER STYLES */
-        .exec-banner {{ background: linear-gradient(135deg, #1e272e 0%, #2f3640 100%); color: #f5f6fa; padding: 25px; border-radius: 10px; margin-bottom: 30px; box-shadow: 0 6px 15px rgba(0,0,0,0.15); border-left: 6px solid #4cd137; }}
-        .exec-banner h2 {{ margin-top: 0; color: #fbc531; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; font-size: 1.6em; }}
-        .exec-metrics {{ display: flex; justify-content: space-between; font-size: 1.3em; margin-bottom: 20px; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; }}
-        .exec-metrics span {{ color: #4cd137; font-weight: bold; font-size: 1.2em; }}
-        .spatial-dist {{ background: rgba(0,0,0,0.3); padding: 15px; border-radius: 6px; max-height: 220px; overflow-y: auto; font-family: 'Courier New', Courier, monospace; font-size: 0.9em; margin-top: 10px; }}
-        /* SCROLLBAR */
-        .spatial-dist::-webkit-scrollbar {{ width: 8px; }}
-        .spatial-dist::-webkit-scrollbar-track {{ background: rgba(0,0,0,0.1); border-radius: 4px; }}
-        .spatial-dist::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,0.3); border-radius: 4px; }}
+        .exec-banner {{ background: #1e272e; color: #f5f6fa; padding: 30px; border-radius: 16px; margin-bottom: 35px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); position: relative; overflow: hidden; }}
+        .exec-banner::before {{ content: ''; position: absolute; top: 0; left: 0; width: 6px; height: 100%; background: {health_color}; }}
         
-        .chart-container {{ position: relative; height: 400px; width: 100%; margin-top: 20px; margin-bottom: 40px; }}
-        .step-card {{ background: #fdfdfd; border-left: 4px solid #3498db; padding: 15px; margin: 15px 0; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }}
-        .step-card.geo-highlight {{ border-left: 4px solid #e74c3c; background: #fff5f5; }}
-        .step-title {{ font-weight: bold; color: #2980b9; font-size: 1.1em; }}
-        .geo-highlight .step-title {{ color: #c0392b; }}
-        ul {{ margin: 5px 0; padding-left: 20px; list-style-type: none; }}
-        li {{ font-size: 0.95em; color: #444; margin-bottom: 4px; }}
-        .count-badge {{ background-color: #e74c3c; color: white; padding: 2px 8px; border-radius: 12px; font-weight: bold; font-size: 0.85em; margin-right: 8px; display: inline-block; min-width: 20px; text-align: center; }}
-        .highlight-tag {{ background-color: #f39c12; color: white; font-size: 0.75em; padding: 2px 6px; border-radius: 4px; vertical-align: middle; margin-left: 8px; }}
+        .score-container {{ margin-bottom: 25px; }}
+        .score-title {{ font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px; color: #a4b0be; margin-bottom: 8px; display: block; }}
+        .progress-bg {{ background: rgba(255,255,255,0.1); width: 100%; height: 12px; border-radius: 10px; overflow: hidden; }}
+        .progress-bar {{ background: {health_color}; height: 100%; width: {usable_pct}%; transition: width 1s ease-in-out; }}
+        
+        .grid-metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px; }}
+        .metric-card {{ background: rgba(255,255,255,0.05); padding: 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); }}
+        .metric-value {{ font-size: 2em; font-weight: 800; margin: 5px 0; }}
+        .metric-label {{ font-size: 0.85em; color: #ced6e0; text-transform: uppercase; letter-spacing: 0.5px; }}
+        
+        .spatial-dist {{ background: rgba(0,0,0,0.2); padding: 15px 20px; border-radius: 10px; max-height: 200px; overflow-y: auto; font-family: 'Courier New', Courier, monospace; }}
+        
+        /* SCROLLBAR */
+        ::-webkit-scrollbar {{ width: 8px; }}
+        ::-webkit-scrollbar-track {{ background: rgba(0,0,0,0.05); border-radius: 4px; }}
+        ::-webkit-scrollbar-thumb {{ background: rgba(0,0,0,0.2); border-radius: 4px; }}
+        
+        /* CHARTS & CARDS */
+        .content-section {{ background: white; padding: 30px; border-radius: 16px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); margin-bottom: 30px; }}
+        .section-title {{ font-size: 1.4em; font-weight: 800; margin-top: 0; margin-bottom: 20px; border-bottom: 2px solid #f1f2f6; padding-bottom: 10px; }}
+        
+        .chart-container {{ position: relative; height: 350px; width: 100%; margin-bottom: 30px; }}
+        
+        .issues-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }}
+        .step-card {{ background: #ffffff; border: 1px solid #e1e8ed; padding: 20px; border-radius: 12px; transition: transform 0.2s, box-shadow 0.2s; }}
+        .step-card:hover {{ transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,0.06); }}
+        .step-card.geo-highlight {{ border-top: 4px solid #e74c3c; background: #fffcfc; }}
+        .step-card:not(.geo-highlight) {{ border-top: 4px solid #3498db; }}
+        
+        .step-title {{ font-weight: 800; color: #2c3e50; font-size: 1.1em; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }}
+        .step-stats {{ font-size: 0.9em; color: #7f8c8d; margin-bottom: 15px; display: flex; gap: 15px; }}
+        .step-stats span {{ display: flex; align-items: center; }}
+        .step-stats strong {{ color: #2c3e50; margin-left: 5px; }}
+        
+        ul.detail-list {{ margin: 0; padding: 0; list-style: none; }}
+        ul.detail-list li {{ font-size: 0.9em; color: #34495e; margin-bottom: 8px; display: flex; align-items: center; background: #f8f9fa; padding: 6px 10px; border-radius: 6px; }}
+        .count-badge {{ background-color: #e74c3c; color: white; padding: 2px 8px; border-radius: 20px; font-weight: 600; font-size: 0.85em; margin-right: 12px; min-width: 25px; text-align: center; }}
+        .highlight-tag {{ background-color: #f39c12; color: white; font-size: 0.7em; padding: 3px 8px; border-radius: 20px; font-weight: 600; text-transform: uppercase; }}
+        .empty-state {{ color: #bdc3c7; font-size: 0.9em; font-style: italic; }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📊 Data Health Diagnostic Report</h1>
-        <p style="color: #7f8c8d; font-size: 0.9em;">Generated at: <strong>{time.strftime("%Y-%m-%d %H:%M:%S")}</strong></p>
         
-        <!-- NEW DISTINCTIVE EXECUTIVE BANNER -->
+        <div class="header">
+            <div>
+                <h1>Data Health Diagnostic</h1>
+                <p>Pipeline Execution Report</p>
+            </div>
+            <p>Generated: <strong>{time.strftime("%Y-%m-%d %H:%M:%S")}</strong></p>
+        </div>
+        
         <div class="exec-banner">
-            <h2>Executive Summary</h2>
-            <div class="exec-metrics">
-                <div>Total Records Processed: <br><strong>{total_records:,}</strong></div>
-                <div style="text-align: right;">Total Usable Records: <br><span>{usable_count:,}</span> ({usable_pct:.1f}%)</div>
+            <div class="score-container">
+                <span class="score-title">Data Usability Score: {usable_pct:.1f}%</span>
+                <div class="progress-bg">
+                    <div class="progress-bar"></div>
+                </div>
             </div>
             
-            <h3 style="color: #dcdde1; margin-bottom: 10px; font-size: 1.2em;">📍 Spatial Evaluation Summary</h3>
-            <ul style="list-style: none; padding: 0; margin: 0 0 15px 0; color: #f5f6fa;">
-                <li>Total Evaluated Points: <strong>{spatial_summary.get("total", 0):,}</strong></li>
-                <li>❌ Spatial Outliers (Outside area): <strong style="color: #e84118;">{spatial_summary.get("outliers", 0):,}</strong></li>
-                <li>✅ Retained Points (Inside area): <strong style="color: #4cd137;">{spatial_summary.get("retained", 0):,}</strong></li>
-            </ul>
-
-            <h4 style="color: #dcdde1; margin-bottom: 8px;">Distribution of Retained Points:</h4>
+            <div class="grid-metrics">
+                <div class="metric-card">
+                    <div class="metric-label">Total Processed</div>
+                    <div class="metric-value">{total_records:,}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" style="color: {health_color};">Usable Records</div>
+                    <div class="metric-value" style="color: {health_color};">{usable_count:,}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label" style="color: #e84118;">Spatial Outliers</div>
+                    <div class="metric-value" style="color: #e84118;">{spatial_summary.get("outliers", 0):,}</div>
+                </div>
+            </div>
+            
+            <h4 style="color: #dcdde1; margin: 0 0 10px 0; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px;">Geographic Distribution (Valid Points)</h4>
             <div class="spatial-dist">
                 {dist_html if dist_html else "<div style='color: #7f8fa6;'>No spatial distribution data available.</div>"}
             </div>
         </div>
 
-        <h2>Issue Details & Impact Breakdown</h2>
-        <div class="chart-container">
-            <canvas id="reportChart"></canvas>
+        <div class="content-section">
+            <h2 class="section-title">Impact Overview</h2>
+            <div class="chart-container">
+                <canvas id="reportChart"></canvas>
+            </div>
         </div>
+
+        <div class="content-section">
+            <h2 class="section-title">Detailed Diagnostic Flags</h2>
+            <div class="issues-grid">
 """
 
     for m in metrics_list:
         card_class = "step-card geo-highlight" if m["is_geo"] else "step-card"
         tag = (
-            "<span class='highlight-tag'>Geo / Spatial Impact</span>"
+            "<span class='highlight-tag'>Spatial Flag</span>"
             if m["is_geo"]
             else ""
         )
 
         html_content += f"""
-        <div class="{card_class}">
-            <div class="step-title">{m["step_name"]} {tag}</div>
-            <p>Records flagged: <strong>{m["dropped_count"]:,}</strong> | Unaffected: {m["remaining_count"]:,}</p>
+                <div class="{card_class}">
+                    <div class="step-title">{m["step_name"]} {tag}</div>
+                    
+                    <div class="step-stats">
+                        <span>Flagged: <strong style="color:#e74c3c;">{m["dropped_count"]:,}</strong></span>
+                        <span>Clean: <strong>{m["remaining_count"]:,}</strong></span>
+                    </div>
 """
         if m["top_dropped"]:
-            html_content += "<ul>"
+            html_content += "<ul class='detail-list'>"
             for name, freq in m["top_dropped"]:
-                html_content += f"<li><span class='count-badge'>{freq}</span> <code>{name}</code></li>"
+                # Truncate very long names for UI cleanliness
+                display_name = name if len(str(name)) < 45 else str(name)[:42] + "..."
+                html_content += f"<li><span class='count-badge'>{freq}</span> <code>{display_name}</code></li>"
             html_content += "</ul>"
         else:
-            html_content += "<p style='color: #888; font-size: 0.9em;'>No records flagged for this issue.</p>"
-
-        if m.get("top_bottlers"):
-            html_content += """
-            <div style="margin-top: 12px; border-top: 1px dashed #dcdcdc; padding-top: 8px;">
-                <strong style="font-size: 0.9em; color: #c0392b;">🏆 Top 5 States with Most Bottlers:</strong>
-                <ul style="margin-top: 4px;">
-            """
-            for state_name, b_count in m["top_bottlers"]:
-                html_content += f"<li><span class='count-badge' style='background-color: #f39c12;'>{b_count}</span> <code>State: {state_name}</code></li>"
-            html_content += "</ul></div>"
+            html_content += "<div class='empty-state'>No issues detected for this rule. ✨</div>"
 
         html_content += "</div>"
 
     html_content += f"""
+            </div>
+        </div>
     </div>
+    
     <script>
         const ctx = document.getElementById('reportChart').getContext('2d');
         const reportChart = new Chart(ctx, {{
@@ -232,17 +263,26 @@ def generate_html_report(
                 datasets: [{{
                     label: 'Flagged Records',
                     data: {dropped_data},
-                    backgroundColor: 'rgba(231, 76, 60, 0.7)',
-                    borderColor: 'rgba(192, 57, 43, 1)',
-                    borderWidth: 1,
-                    borderRadius: 4
+                    backgroundColor: 'rgba(52, 152, 219, 0.8)',
+                    hoverBackgroundColor: 'rgba(41, 128, 185, 1)',
+                    borderRadius: 6,
+                    borderSkipped: false
                 }}]
             }},
             options: {{
                 responsive: true,
                 maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }}
+                }},
                 scales: {{
-                    y: {{ beginAtZero: true }}
+                    y: {{ 
+                        beginAtZero: true,
+                        grid: {{ color: 'rgba(0,0,0,0.04)', drawBorder: false }}
+                    }},
+                    x: {{
+                        grid: {{ display: false, drawBorder: false }}
+                    }}
                 }}
             }}
         }});
@@ -284,7 +324,7 @@ def generate_and_save_reports(
         "retained": total_records,
         "distribution": [],
     }
-
+    
     if "geo_outlier" in df.columns:
         outliers_count = df.select(pl.col("geo_outlier").sum()).item()
         retained_df = df.filter(~pl.col("geo_outlier"))
