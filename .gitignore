@@ -223,3 +223,6 @@ data_cleaning/uv.lock
 *.parquet
 *.ipynb
 *.geojson
+*.csv#
+*.xlsx
+*.pdf

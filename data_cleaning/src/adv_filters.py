@@ -6,6 +6,7 @@ import polars as pl
 from sklearn.neighbors import BallTree
 
 from config.global_exclude import GLOBAL_EXCLUDE_KEYWORDS
+from src.drop_audit import pick_id_col, report_drop_lines, strip_audit_cols
 from src.hours_filter import apply_hours_filter_logic
 
 try:
@@ -26,11 +27,17 @@ def apply_hours_and_fuzzy_filters(
     fuzzy_thresh: int = 80,
     dist_m: int = 100,
     items_to_track: list[str] = None,
-) -> tuple[pl.DataFrame, list[str] | None, str | None]:
+) -> tuple[pl.DataFrame, list[str] | None, str | None, pl.DataFrame]:
     """
     Applies hours filters (optional), global mislabeling filter, and fuzzy + spatial deduplication.
+
+    Returns the survivors, the updated tracked items, the audit report and the dropped
+    records annotated with 'drop_reason', 'drop_match' (excluded keyword, opening hours
+    or the name it was fuzzy-matched against), 'drop_partners' (the record kept instead)
+    and 'drop_detail' (similarity score or weekly hours).
     """
     is_auditing = items_to_track is not None and len(items_to_track) > 0
+    id_col = pick_id_col(df)
 
     # Add row index for precise tracking of drop reasons
     df = df.with_row_index("__row_id")
@@ -56,15 +63,22 @@ def apply_hours_and_fuzzy_filters(
         pl.col("_name_lower")
         .str.contains(pattern_global)
         .not_()
-        .alias("flag_global_keywords")
+        .alias("flag_global_keywords"),
+        # The keywords are literals, so the extracted text IS the offending keyword
+        pl.col("_name_lower").str.extract(pattern_global, 0).alias("_matched_keyword"),
     )
 
-    # Initialize drop_reason for records failing global keywords
+    # Initialize drop_reason / drop_match for records failing global keywords
+    failed_keywords = pl.col("flag_global_keywords").not_()
     df = df.with_columns(
-        pl.when(pl.col("flag_global_keywords").not_())
+        pl.when(failed_keywords)
         .then(pl.lit("1_Global_Keywords"))
         .otherwise(pl.lit(None))
-        .alias("drop_reason")
+        .alias("drop_reason"),
+        pl.when(failed_keywords)
+        .then(pl.col("_matched_keyword"))
+        .otherwise(pl.lit(None))
+        .alias("drop_match"),
     )
 
     # 3. Hours Filter (Delegado al nuevo módulo)
@@ -85,7 +99,8 @@ def apply_hours_and_fuzzy_filters(
     cands_mask = df.select(cands_mask_expr).to_series().to_numpy()
     df_cands = df.filter(cands_mask_expr)
 
-    dup_local = set()
+    # Maps each dropped candidate to the one it matched: j -> (i, similarity)
+    dup_local = {}
     if df_cands.height > 0:
         coords_rad = np.radians(df_cands.select(["latitude", "longitude"]).to_numpy())
         tree = BallTree(coords_rad, metric="haversine")
@@ -102,13 +117,27 @@ def apply_hours_and_fuzzy_filters(
                     continue
                 sim_score = _name_sim(name_i, cands_names[j])
                 if sim_score >= fuzzy_thresh:
-                    dup_local.add(j)
+                    dup_local[j] = (i, sim_score)
 
     cands_indices = np.where(cands_mask)[0]
     fuzzy_dropped_row_ids = set()
+    fuzzy_audit_rows = []
     if dup_local:
-        for idx in cands_indices[list(dup_local)]:
-            fuzzy_dropped_row_ids.add(idx)
+        cands_ids = (
+            df_cands.get_column(id_col).cast(pl.String).to_list() if id_col else None
+        )
+        for j, (i, sim_score) in dup_local.items():
+            row_id = int(cands_indices[j])
+            fuzzy_dropped_row_ids.add(row_id)
+            fuzzy_audit_rows.append(
+                {
+                    "__row_id": row_id,
+                    # The name of the record it was considered a duplicate of
+                    "_fuzzy_match": cands_names[i],
+                    "_fuzzy_partner": cands_ids[i] if cands_ids else None,
+                    "_fuzzy_detail": f"similarity={sim_score:.0f}% (kept the other one)",
+                }
+            )
 
     flag_fuzzy_list = [
         row_id not in fuzzy_dropped_row_ids
@@ -118,32 +147,67 @@ def apply_hours_and_fuzzy_filters(
         pl.Series("flag_fuzzy_dedup", flag_fuzzy_list, dtype=pl.Boolean)
     )
 
+    # Attach the fuzzy match details before deciding the reason
+    if fuzzy_audit_rows:
+        fuzzy_df = pl.DataFrame(fuzzy_audit_rows).with_columns(
+            pl.col("__row_id").cast(df.schema["__row_id"])
+        )
+        df = df.join(fuzzy_df, on="__row_id", how="left")
+    else:
+        df = df.with_columns(
+            pl.lit(None).cast(pl.String).alias("_fuzzy_match"),
+            pl.lit(None).cast(pl.String).alias("_fuzzy_partner"),
+            pl.lit(None).cast(pl.String).alias("_fuzzy_detail"),
+        )
+
     # Update drop_reason if dropped at fuzzy dedup
+    dropped_by_fuzzy = pl.col("drop_reason").is_null() & (
+        pl.col("flag_fuzzy_dedup") == False
+    )
     df = df.with_columns(
-        pl.when(pl.col("drop_reason").is_null() & (pl.col("flag_fuzzy_dedup") == False))
+        pl.when(dropped_by_fuzzy)
         .then(pl.lit("3_Fuzzy_Dedup"))
         .otherwise(pl.col("drop_reason"))
-        .alias("drop_reason")
+        .alias("drop_reason"),
+        pl.when(dropped_by_fuzzy)
+        .then(pl.col("_fuzzy_match"))
+        .otherwise(pl.col("drop_match"))
+        .alias("drop_match"),
+        pl.when(dropped_by_fuzzy)
+        .then(pl.col("_fuzzy_partner"))
+        .otherwise(None)
+        .cast(pl.String)
+        .alias("drop_partners"),
+        pl.when(dropped_by_fuzzy)
+        .then(pl.col("_fuzzy_detail"))
+        .otherwise(pl.col("drop_detail") if "drop_detail" in df.columns else None)
+        .cast(pl.String)
+        .alias("drop_detail"),
     )
 
     # Separate survivors and dropped records
-    df_dropped = df.filter(pl.col("drop_reason").is_not_null())
-    df_survivors = df.filter(pl.col("drop_reason").is_null()).drop(
-        [
-            "__row_id",
-            "_name_lower",
-            "_total_weekly_hours",
-            "_is_night_only",
-            "flag_global_keywords",
-            "flag_hours",
-            "flag_fuzzy_dedup",
-            "drop_reason",
-        ],
-        strict=False,
+    helper_cols = [
+        "__row_id",
+        "_name_lower",
+        "_matched_keyword",
+        "_total_weekly_hours",
+        "_is_night_only",
+        "_fuzzy_match",
+        "_fuzzy_partner",
+        "_fuzzy_detail",
+        "flag_global_keywords",
+        "flag_hours",
+        "flag_fuzzy_dedup",
+    ]
+    df_dropped = df.filter(pl.col("drop_reason").is_not_null()).drop(
+        helper_cols, strict=False
+    )
+    df_survivors = strip_audit_cols(
+        df.filter(pl.col("drop_reason").is_null()), extra=helper_cols
     )
 
     if not is_auditing:
-        return df_survivors, items_to_track, None
+        return df_survivors, items_to_track, None, df_dropped
 
     # --- BUILD AUDIT REPORT & UPDATE TRACKED ITEMS ---
     report_lines = []
@@ -165,23 +229,19 @@ def apply_hours_and_fuzzy_filters(
 
         if len(survived) > 0:
             report_lines.append(
-                f"    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
+                f"\n    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
             )
 
         if len(dropped) > 0:
             dropped_items_set.add(text)
-            reasons = dropped.group_by("drop_reason").agg(pl.len().alias("count"))
-            for row in reasons.iter_rows():
-                report_lines.append(
-                    f"    ❌ DROPPED: Removed at this step due to: [{row[0]}] ({row[1]} records dropped)."
-                )
+            report_lines.extend(report_drop_lines(dropped))
 
     updated_items_to_track = [
         item for item in items_to_track if item not in dropped_items_set
     ]
 
     if len(report_lines) == 0:
-        return df_survivors, updated_items_to_track, None
+        return df_survivors, updated_items_to_track, None, df_dropped
 
     final_report_text = (
         "=" * 45
@@ -191,4 +251,4 @@ def apply_hours_and_fuzzy_filters(
         + "\n"
     )
 
-    return df_survivors, updated_items_to_track, final_report_text
+    return df_survivors, updated_items_to_track, final_report_text, df_dropped

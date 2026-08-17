@@ -78,16 +78,37 @@ def apply_hours_filter_logic(
         ]
     )
 
+    is_night_only = pl.col("_is_night_only") == True
+    too_few_hours = pl.col("_total_weekly_hours") < min_hours
     condicion_rechazo = pl.col("_total_weekly_hours").is_not_null() & (
-        (pl.col("_is_night_only") == True) | (pl.col("_total_weekly_hours") < min_hours)
+        is_night_only | too_few_hours
     )
 
     df = df.with_columns((~condicion_rechazo).alias("flag_hours"))
+
+    dropped_by_hours = pl.col("drop_reason").is_null() & pl.col("flag_hours").not_()
     df = df.with_columns(
-        pl.when(pl.col("drop_reason").is_null() & pl.col("flag_hours").not_())
+        pl.when(dropped_by_hours)
         .then(pl.lit("2_Hours_Filter"))
         .otherwise(pl.col("drop_reason"))
-        .alias("drop_reason")
+        .alias("drop_reason"),
+        # Which of the two hour rules rejected it
+        pl.when(dropped_by_hours & is_night_only)
+        .then(pl.lit(f"night_only (opens at or after {night_start}:00)"))
+        .when(dropped_by_hours)
+        .then(pl.lit(f"weekly_hours < {min_hours}"))
+        .otherwise(pl.col("drop_match"))
+        .alias("drop_match"),
+        pl.when(dropped_by_hours)
+        .then(
+            pl.concat_str(
+                pl.lit("total_weekly_hours="),
+                pl.col("_total_weekly_hours").round(1).cast(pl.String),
+            )
+        )
+        .otherwise(None)
+        .cast(pl.String)
+        .alias("drop_detail"),
     )
 
     return df

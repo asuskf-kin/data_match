@@ -5,12 +5,13 @@ import polars as pl
 
 from config.global_exclude import FINAL_KEYWORD_EXCLUDE_KEYWORDS
 from config.keep_words import KEEP_WORDS
+from src.drop_audit import report_drop_lines, strip_audit_cols
 
 
 def final_keyword_exclusion(
     df: pl.DataFrame,
     items_to_track: list[str] = None,
-) -> tuple[pl.DataFrame, list[str] | None, str | None]:
+) -> tuple[pl.DataFrame, list[str] | None, str | None, pl.DataFrame]:
     """Filters businesses using the FINAL_KEYWORD_EXCLUDE_KEYWORDS list from
     config/global_exclude.py, applying Regular Expressions while respecting a
     whitelist (KEEP_WORDS).
@@ -24,19 +25,21 @@ def final_keyword_exclusion(
 
     Returns
     -------
-    tuple[pl.DataFrame, list[str] | None, str | None]
+    tuple[pl.DataFrame, list[str] | None, str | None, pl.DataFrame]
         A tuple containing:
         - The clean DataFrame (survivors).
         - The updated `items_to_track` list (unmodified if not auditing).
         - An audit report string if `items_to_track` was provided and items were processed,
           otherwise None.
+        - The dropped records, annotated with 'drop_reason', 'drop_match' (the excluded
+          keyword found in the name) and 'drop_pattern' (the regex built for it).
     """
     is_auditing = items_to_track is not None and len(items_to_track) > 0
 
     # 1. Load exclusion keywords from config
     keywords = FINAL_KEYWORD_EXCLUDE_KEYWORDS
     if df.is_empty() or not keywords:
-        return df, items_to_track, None
+        return df, items_to_track, None, df.clear()
 
     # 2. Regex transformation helper functions
     def contains_special_characters(kw_list):
@@ -126,45 +129,49 @@ def final_keyword_exclusion(
     )
 
     df_filtered_out_full = df_temp.filter(pl.col("detected_keyword").is_not_null())
-    excluded_ids = df_filtered_out_full.get_column("__row_id")
 
-    # Flag drop reasons for the audit step
+    # Flag drop reasons for the audit step, reusing the keyword already detected above
+    # instead of running detect_keyword over every name a second time
+    df_clean = df_clean.join(
+        df_filtered_out_full.select(["__row_id", "detected_keyword"]),
+        on="__row_id",
+        how="left",
+    )
+
+    excluded = pl.col("detected_keyword").is_not_null()
+    # The regex that the detected keyword produces, for reference in the audit file
+    pattern_lookup = {
+        kw: transform_keywords_to_regex([kw])[0]
+        for kw in df_filtered_out_full.get_column("detected_keyword").unique().to_list()
+        if kw is not None
+    }
+
     df_clean = df_clean.with_columns(
-        pl.when(pl.col("__row_id").is_in(excluded_ids))
-        .then(
-            pl.concat_str(
-                [
-                    pl.lit("1_Final_Regex_Keyword_("),
-                    pl.col("name").map_elements(
-                        lambda x: detect_keyword(x, keywords) or "Unknown",
-                        return_dtype=pl.String,
-                    ),
-                    pl.lit(")"),
-                ]
-            )
-        )
+        pl.when(excluded)
+        .then(pl.lit("1_Final_Regex_Keyword"))
         .otherwise(pl.lit(None))
-        .alias("drop_reason")
+        .alias("drop_reason"),
+        pl.when(excluded)
+        .then(pl.col("detected_keyword"))
+        .otherwise(pl.lit(None))
+        .alias("drop_match"),
+        pl.when(excluded)
+        .then(pl.col("detected_keyword").replace_strict(pattern_lookup, default=None))
+        .otherwise(pl.lit(None))
+        .cast(pl.String)
+        .alias("drop_pattern"),
     )
 
-    # ==========================================
-    # 🚀 FAST MODE (No auditing)
-    # ==========================================
-    if not is_auditing:
-        df_survivors = df_clean.filter(pl.col("drop_reason").is_null()).drop(
-            ["__row_id", "drop_reason"], strict=False
-        )
-        return df_survivors, items_to_track, None
-
-    # ==========================================
-    # 🔍 AUDIT MODE
-    # ==========================================
+    helper_cols = ["__row_id", "detected_keyword"]
     df_dropped = df_clean.filter(pl.col("drop_reason").is_not_null()).drop(
-        "__row_id", strict=False
+        helper_cols, strict=False
     )
-    df_survivors = df_clean.filter(pl.col("drop_reason").is_null()).drop(
-        ["__row_id", "drop_reason"], strict=False
+    df_survivors = strip_audit_cols(
+        df_clean.filter(pl.col("drop_reason").is_null()), extra=helper_cols
     )
+
+    if not is_auditing:
+        return df_survivors, items_to_track, None, df_dropped
 
     # --- BUILD AUDIT REPORT & UPDATE TRACKED ITEMS ---
     report_lines = []
@@ -186,16 +193,12 @@ def final_keyword_exclusion(
 
         if len(survived) > 0:
             report_lines.append(
-                f"    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
+                f"\n    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
             )
 
         if len(dropped) > 0:
             dropped_items_set.add(text)
-            reasons = dropped.group_by("drop_reason").agg(pl.len().alias("count"))
-            for row in reasons.iter_rows():
-                report_lines.append(
-                    f"    ❌ DROPPED: Removed at this step due to: [{row[0]}] ({row[1]} records dropped)."
-                )
+            report_lines.extend(report_drop_lines(dropped))
 
     # Prune dropped items from tracked list
     updated_items_to_track = [
@@ -203,7 +206,7 @@ def final_keyword_exclusion(
     ]
 
     if len(report_lines) == 0:
-        return df_survivors, updated_items_to_track, None
+        return df_survivors, updated_items_to_track, None, df_dropped
 
     final_report_text = (
         "=" * 45
@@ -213,4 +216,4 @@ def final_keyword_exclusion(
         + "\n"
     )
 
-    return df_survivors, updated_items_to_track, final_report_text
+    return df_survivors, updated_items_to_track, final_report_text, df_dropped
