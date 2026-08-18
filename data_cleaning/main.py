@@ -15,7 +15,7 @@ from src.geo_dedup import balltree_spatial_deduplication
 from src.normalize import normalize_names
 from src.report import analyze_step_drop, generate_html_report
 from src.utils import (
-    deduplicate_records,
+    deduplicate_records_with_audit,
     finalize_audit_report,
     init_audit_file,
     log_row_reduction,
@@ -31,12 +31,12 @@ logging.basicConfig(
 # Adapter to standardize outputs
 # ==========================================
 def _run_module_1(df, items_to_track):
-    """Wraps Module 1 so it returns (df, items, report) just like the others."""
-    df_norm = deduplicate_records(
+    """Wraps Module 1 so it returns (df, items, report, dropped) just like the others."""
+    df_norm, df_dropped = deduplicate_records_with_audit(
         df=normalize_names(df),
         subset=["name_normalized", "latitude", "longitude"],
     )
-    return df_norm, items_to_track, None
+    return df_norm, items_to_track, None, df_dropped
 
 
 # ==========================================
@@ -126,10 +126,14 @@ def run_pipeline(
 
         prev_df = current_df
 
-        # Execute the module-specific function
-        current_df, items_to_track, mod_report = step["func"](
-            current_df, items_to_track
-        )
+        # Execute the module-specific function.
+        # Modules may return a 4th element: the dropped rows with a 'drop_reason' column.
+        result = step["func"](current_df, items_to_track)
+        if len(result) == 4:
+            current_df, items_to_track, mod_report, dropped_df = result
+        else:
+            current_df, items_to_track, mod_report = result
+            dropped_df = None
 
         # 2. Write module report to .txt audit file
         if mod_report:
@@ -152,7 +156,12 @@ def run_pipeline(
         if save_drops:
             try:
                 save_dropped_records(
-                    prev_df, current_df, DATA_DIR, step["file"], save_drops
+                    prev_df,
+                    current_df,
+                    DATA_DIR,
+                    step["file"],
+                    save_drops,
+                    dropped_df=dropped_df,
                 )
             except Exception as e:
                 logging.warning(f"Could not save drops for {step['name']}: {e}")

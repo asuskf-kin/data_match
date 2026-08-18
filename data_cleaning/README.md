@@ -14,6 +14,7 @@ Every step is auditable: you can trace exactly where a given business was droppe
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Example code](#example-code)
+- [Why was a record dropped?](#why-was-a-record-dropped)
 - [Outputs](#outputs)
 - [Example cases](#example-cases)
 - [Project structure](#project-structure)
@@ -143,6 +144,20 @@ paths:
   output_data: "data/processed/dataplor_final_pipeline_output.csv"  # output
 ```
 
+### `reporte:` — naming the executive summary
+
+```yaml
+reporte:
+  carpeta: "reports"
+  nombre: "reporte_ejecutivo_{pais}_{canal}_{fecha}"
+```
+
+`report.ipynb` writes its HTML and PDF to `carpeta` using `nombre` as the base filename
+(the extension is added). Placeholders: `{pais}` (from `active_country`), `{canal}` (the
+notebook's `CANAL`, slugified — `todos_los_canales` when unset) and `{fecha}`
+(`YYYYMMDD_HHMMSS`). Drop `{fecha}` to overwrite the same file on every run. An unknown
+placeholder falls back to the default name and is reported as a warning inside the report.
+
 ### Runtime switches — bottom of `main.py`
 
 ```python
@@ -209,7 +224,7 @@ run_pipeline(
 
 ### Call a single module directly
 
-Every module has the same signature `(df, ...) -> (df, items_to_track, report)` and works on a **Polars** DataFrame:
+Every module has the same signature `(df, ...) -> (df, items_to_track, report, dropped_df)` and works on a **Polars** DataFrame:
 
 ```python
 import pandas as pd
@@ -221,12 +236,58 @@ df = pl.from_pandas(pd.read_csv("data/raw/dataplor_cleaned.csv", low_memory=Fals
 from src.normalize import normalize_names
 df = normalize_names(df)
 
-clean_df, _, report = filter_chains_and_duplicates(
+clean_df, _, report, dropped_df = filter_chains_and_duplicates(
     df, max_appearances=4, items_to_track=["OXXO"]
 )
 print(report)              # audit text: did "OXXO" survive or get dropped?
 clean_df.write_csv("chains_removed.csv")
+
+print(dropped_df.select(["name_normalized", "drop_reason", "drop_match", "drop_pattern"]))
 ```
+
+---
+
+## Why was a record dropped?
+
+Every module returns a 4th element (`dropped_df`): the rows it removed, annotated with the
+columns below (defined in [`src/drop_audit.py`](src/drop_audit.py)). The pipeline writes
+them to `data/dropped/0X_*.csv`, so no removal is a black box. Each module fills in the
+columns that apply to it.
+
+| Column | Meaning |
+| --- | --- |
+| `drop_reason` | The rule that removed the row. Rules are evaluated in order and the first match wins, so each row has exactly one reason. |
+| `drop_match` | What it matched on: the chain substring, the excluded keyword, the shared duplicate key, the `parent_location`… |
+| `drop_pattern` | The exact regex behind the match (e.g. `\boxxo\b`) |
+| `drop_group_size` | How many records shared the group |
+| `drop_partners` | Ids of the records it was grouped with or compared against, up to 10 |
+| `drop_detail` | Extra context: which record was kept, the similarity score, the distance to the centroid, the weekly hours… |
+
+What each step reports:
+
+| # | Module | `drop_reason` | `drop_match` | Who it was grouped with |
+| --- | --- | --- | --- | --- |
+| 1 | Normalization | `1_Exact_Duplicate_(name_normalized+latitude+longitude)` | The composite key | `drop_partners` = group ids, `drop_detail` = `kept: <id>` |
+| 2 | Chain Filter | `1_Regex_Chain`, `2_Too_Many_Duplicates_(>N)`, `3_Flagged_As_Chain_In_Source` | Chain substring / shared key / `chain_name` | `drop_partners` = ids sharing the name |
+| 3 | BallTree Dedup | `Geo_Spatial_Duplicate_(<Nm)` | The normalized name they shared | `drop_partners` = group ids, `drop_detail` = `kept: <id>` |
+| 4 | Hours & Fuzzy | `1_Global_Keywords`, `2_Hours_Filter`, `3_Fuzzy_Dedup` | Excluded keyword / which hour rule failed / the name it matched | `drop_partners` = the record kept instead, `drop_detail` = `similarity=N%` |
+| 5 | Final Regex | `1_Final_Regex_Keyword` | The blacklisted keyword found in the name | — |
+| 6 | Crowded Property | `1_Crowded_Property_(>=N_within_Rm)` | The shared `parent_location` | `drop_partners` = ids in the property, `drop_detail` = distance to centroid |
+
+Real examples from a Chile run:
+
+```
+name                  drop_reason            drop_match          drop_pattern / drop_detail
+Hotel Estrella        1_Regex_Chain          hotel               \bhotel\b
+Facultad de Ciencias  1_Final_Regex_Keyword  Social              \bS[oó]c[ií][aá]l\w*
+Terra Luna Lodge      3_Fuzzy_Dedup          terra luna          similarity=100% (kept the other one)
+Bar Nocturno          2_Hours_Filter         night_only (opens at or after 19:00)
+The World of Wine     1_Crowded_Property…    ce5a9acd-75f3-…     78.0m from the property centroid
+```
+
+Caveat on `drop_pattern` in module 2: it reports the pattern behind the **leftmost** match
+in the name, so `farmacia guadalajara` is attributed to `\bfarmacia\b` even if a more
+specific pattern also matches.
 
 ---
 
@@ -238,16 +299,48 @@ After a full run you get:
 |----------|----------|
 | `data/processed/dataplor_final_pipeline_output.csv` | **The final cleaned dataset.** |
 | `data/processed/0X_*.csv` | Snapshot of survivors after each step (if `save_tracking=True`). |
-| `data/dropped/0X_*.csv` | The rows each step **removed** (if `save_drops=True`) — great for QA. |
+| `data/dropped/0X_*.csv` | The rows each step **removed** (if `save_drops=True`), with the `drop_*` columns explaining why — see [Why was a record dropped?](#why-was-a-record-dropped). |
 | `data/audit/audit_report_<timestamp>.txt` | Per-name trace of where tracked items survived or were dropped (if `items_to_track` set). |
 | `reports/pipeline_report_<timestamp>.html` | Interactive bar chart of records removed per step + top-5 dropped names. |
+| `reports/<reporte.nombre>.html` / `.pdf` | **Executive summary** — retention headline, funnel, drop reasons, what triggered them, impact per category and region. Produced by [`report.ipynb`](report.ipynb): HTML self-contained for sharing, A4 PDF for printing. |
+
+### Executive summary — `report.ipynb`
+
+Run the notebook top to bottom after a pipeline run (`save_drops=True`). Cell 0 holds the only
+knob: `CANAL` (e.g. `"On Premise"`, or `None` for no channel filter). When set, the channel cut
+is reported as step 7 of the funnel, so the summary shows both the **complete dataset** and the
+**channel deliverable**, and how many records the channel filter alone removed.
+
+It cross-joins the raw input, the final output and every `data/dropped/0X_*.csv` **by
+`dataplor_id`** — never by `name`, since the same name can have both surviving and dropped
+branches — and answers:
+
+- how much of the universe survives, and which step is the most aggressive;
+- the exact rule behind every removal (`drop_reason`) and the text or regex that triggered it;
+- which business categories and regions absorb the cuts;
+- how many duplicate groups were collapsed and how large they were.
+
+It checks that `initial − dropped = final` and warns, in the notebook and in both exports, when
+the artifacts come from different runs. The last cell writes the HTML **and** an A4 PDF — the
+PDF is built with matplotlib, so it needs no LaTeX, no WeasyPrint and no extra install.
+
+To run it headless:
+
+```bash
+C:/Python314/python.exe -m nbconvert --to notebook --execute --inplace report.ipynb
+```
+
+The notebook needs `pandas` + `matplotlib` in the kernel (it deliberately avoids `polars`,
+`jinja2` and `df.style` so it runs on a bare kernel).
 
 **Sample audit report** (from `track_these_elements=["CLUB DE NUTRICION HERBALIFE"]`):
 
 ```
-🔍 Tracked text: 'CLUB DE NUTRICION HERBALIFE'
-    ✅ SURVIVED: Passed this filter successfully (15 records).
-    ❌ DROPPED: Removed at this step due to: [2_Hours_Filter] (37 records dropped).
+🔍 Tracked text: 'FITNESS'
+    ✅ SURVIVED: Passed this filter successfully (208 records).
+    ❌ DROPPED: Removed at this step due to: [1_Regex_Chain] (73 records dropped).
+        ↳ matched on: 'gimnasio'
+        ↳ regex used: \bgimnasio\b
 ```
 
 This tells you 37 Herbalife records were cut by the **hours filter** in module 4 — instantly explaining an unexpected drop without digging through raw data.
@@ -291,6 +384,8 @@ data_cleaning/
 │   ├── adv_filters.py      # module 4 (hours + fuzzy)
 │   ├── final_regex.py      # module 5
 │   ├── crowded_property.py # module 6
+│   ├── hours_filter.py     # opening-hours logic used by module 4
+│   ├── drop_audit.py       # shared drop_* audit columns & report lines
 │   ├── drop_tracker.py     # saves removed rows
 │   ├── report.py           # HTML report + step metrics
 │   └── utils.py            # dedup, logging, audit helpers

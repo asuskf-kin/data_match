@@ -4,6 +4,8 @@ import math
 
 import polars as pl
 
+from src.drop_audit import partners_expr, pick_id_col, report_drop_lines
+
 
 def filter_crowded_same_property(
     df: pl.DataFrame,
@@ -25,8 +27,18 @@ def filter_crowded_same_property(
         Radius in meters around the centroid to define the dense sub-cluster[cite: 1].
     items_to_track : list, optional
         List of strings to track for the audit report.
+
+    Returns
+    -------
+    tuple
+        The survivors, the updated tracked items, the audit report, and the dropped
+        records annotated with 'drop_reason', 'drop_match' (the shared
+        parent_location), 'drop_group_size' (dense points in that property),
+        'drop_partners' (ids sharing the property) and 'drop_detail' (distance to the
+        property centroid).
     """
     is_auditing = items_to_track is not None and len(items_to_track) > 0
+    id_col = pick_id_col(df)
 
     # Ensure required columns exist
     required_cols = ["parent_location", "latitude", "longitude"]
@@ -35,7 +47,7 @@ def filter_crowded_same_property(
             logging.warning(
                 f"Missing column '{col}'. Skipping crowded property filter."
             )
-            return df, items_to_track, None
+            return df, items_to_track, None, df.clear()
 
     # Keep track of original rows to safely drop them later
     df_working = df.with_row_index("__row_id")
@@ -61,7 +73,7 @@ def filter_crowded_same_property(
 
     # If no groups meet the threshold, return the original DataFrame early
     if candidates.height == 0:
-        return df, items_to_track, None
+        return df, items_to_track, None, df.clear()
 
     # 4. Calculate the centroid (mean lat/lon) for each candidate parent_location[cite: 1]
     candidates = candidates.with_columns(
@@ -102,21 +114,39 @@ def filter_crowded_same_property(
     candidates = candidates.join(dense_counts, on="parent_location", how="left")
 
     # 8. Identify the specific row IDs to drop (dense points in a property with >= threshold dense points)[cite: 1]
-    to_drop_ids = candidates.filter(
+    dropped_candidates = candidates.filter(
         pl.col("is_dense") & (pl.col("dense_count") >= threshold)
-    ).get_column("__row_id")
+    )
+    to_drop_ids = dropped_candidates.get_column("__row_id")
 
     # 9. Apply the drop to the original DataFrame
-    df_clean = df_working.filter(~pl.col("__row_id").is_in(to_drop_ids))
+    df_clean = df_working.filter(~pl.col("__row_id").is_in(to_drop_ids)).drop("__row_id")
     df_dropped = df_working.filter(pl.col("__row_id").is_in(to_drop_ids))
 
-    # Clean up the temporary row ID
-    df_clean = df_clean.drop("__row_id")
-    df_dropped = df_dropped.drop("__row_id")
+    # 10. Explain each drop: the property they share, how crowded it was and how far
+    # each point sat from the centroid
+    audit = dropped_candidates.select(
+        "__row_id",
+        pl.lit(f"1_Crowded_Property_(>={threshold}_within_{radius_m:g}m)").alias(
+            "drop_reason"
+        ),
+        pl.col("parent_location").cast(pl.String).alias("drop_match"),
+        pl.col("dense_count").cast(pl.UInt32).alias("drop_group_size"),
+        pl.concat_str(
+            pl.col("dist_from_centroid").round(1).cast(pl.String),
+            pl.lit("m from the property centroid"),
+        ).alias("drop_detail"),
+    )
+    df_dropped = df_dropped.join(audit, on="__row_id", how="left").drop("__row_id")
+
+    if id_col:
+        df_dropped = df_dropped.with_columns(
+            partners_expr(id_col, "drop_match").alias("drop_partners")
+        )
 
     # --- AUDIT REPORTING LOGIC ---
     if not is_auditing or df_dropped.height == 0:
-        return df_clean, items_to_track, None
+        return df_clean, items_to_track, None, df_dropped
 
     report_lines = []
     dropped_items_set = set()
@@ -137,20 +167,18 @@ def filter_crowded_same_property(
         report_lines.append(f"\n🔍 Tracked text: '{text}'")
         if len(survived) > 0:
             report_lines.append(
-                f"    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
+                f"\n    ✅ SURVIVED: Passed this filter successfully ({len(survived)} records)."
             )
         if len(dropped) > 0:
             dropped_items_set.add(text)
-            report_lines.append(
-                f"    ❌ DROPPED: Removed due to property saturation ({len(dropped)} records dropped)."
-            )
+            report_lines.extend(report_drop_lines(dropped))
 
     updated_items_to_track = [
         item for item in items_to_track if item not in dropped_items_set
     ]
 
     if len(report_lines) == 0:
-        return df_clean, updated_items_to_track, None
+        return df_clean, updated_items_to_track, None, df_dropped
 
     final_report_text = (
         "=" * 45 + "\n"
@@ -160,4 +188,4 @@ def filter_crowded_same_property(
         + "\n"
     )
 
-    return df_clean, updated_items_to_track, final_report_text
+    return df_clean, updated_items_to_track, final_report_text, df_dropped

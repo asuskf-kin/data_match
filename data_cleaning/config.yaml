@@ -1,6 +1,6 @@
 pipeline_settings:
   # Set the active country for the pipeline (e.g., "cr", "mx", "co")
-  active_country: "mx"
+  active_country: "cl"
 
 
 paths:
@@ -8,7 +8,17 @@ paths:
   data_dir: "data"
 
   # Paths are declared relative to the project root directory
-  raw_data: "data/raw/dataplor_cleaned.csv"
+  raw_data: "data/raw/cl/dataplor_cleaned.csv"
   
   # You can add future paths here, for example:
-  output_data: "data/processed/dataplor_final_pipeline_output.csv"
+  output_data: "data/processed/dataplor_final_pipeline_output_cl.csv"
+
+# Reporte ejecutivo (report.ipynb)
+reporte:
+  # Carpeta de salida de los reportes
+  carpeta: "reports"
+
+  # Nombre base de los archivos, sin extensión. Se generan .html y .pdf con ese nombre.
+  # Placeholders disponibles: {pais}, {canal}, {fecha}
+  nombre: "reporte_ejecutivo_{pais}_{canal}_{fecha}"
+
