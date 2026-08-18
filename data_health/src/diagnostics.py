@@ -92,6 +92,11 @@ def get_geo_outlier_series(df: pl.DataFrame, geojson_path) -> pl.Series:
     # Perform the spatial join ONLY on unique points
     joined = gpd.sjoin(gdf_points, gdf_poly, how="left", predicate="within")
 
+    # gdf_poly may contain overlapping/nested boundaries (e.g. provinces + cities),
+    # so a single point can match multiple polygons and sjoin duplicates that row.
+    # Keep only the first match per point so the row count matches gdf_points/pdf.
+    joined = joined[~joined.index.duplicated(keep="first")]
+
     # If the matched polygon index (index_right) is NaN, it fell outside the boundaries
     is_outlier = joined["index_right"].isna()
 

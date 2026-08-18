@@ -144,6 +144,20 @@ paths:
   output_data: "data/processed/dataplor_final_pipeline_output.csv"  # output
 ```
 
+### `reporte:` — naming the executive summary
+
+```yaml
+reporte:
+  carpeta: "reports"
+  nombre: "reporte_ejecutivo_{pais}_{canal}_{fecha}"
+```
+
+`report.ipynb` writes its HTML and PDF to `carpeta` using `nombre` as the base filename
+(the extension is added). Placeholders: `{pais}` (from `active_country`), `{canal}` (the
+notebook's `CANAL`, slugified — `todos_los_canales` when unset) and `{fecha}`
+(`YYYYMMDD_HHMMSS`). Drop `{fecha}` to overwrite the same file on every run. An unknown
+placeholder falls back to the default name and is reported as a warning inside the report.
+
 ### Runtime switches — bottom of `main.py`
 
 ```python
@@ -288,7 +302,7 @@ After a full run you get:
 | `data/dropped/0X_*.csv` | The rows each step **removed** (if `save_drops=True`), with the `drop_*` columns explaining why — see [Why was a record dropped?](#why-was-a-record-dropped). |
 | `data/audit/audit_report_<timestamp>.txt` | Per-name trace of where tracked items survived or were dropped (if `items_to_track` set). |
 | `reports/pipeline_report_<timestamp>.html` | Interactive bar chart of records removed per step + top-5 dropped names. |
-| `reports/executive_summary_<timestamp>.html` / `.pdf` | **Executive summary** — retention headline, funnel, drop reasons, what triggered them, impact per category and region. Produced by [`report.ipynb`](report.ipynb): HTML self-contained for sharing, A4 PDF for printing. |
+| `reports/<reporte.nombre>.html` / `.pdf` | **Executive summary** — retention headline, funnel, drop reasons, what triggered them, impact per category and region. Produced by [`report.ipynb`](report.ipynb): HTML self-contained for sharing, A4 PDF for printing. |
 
 ### Executive summary — `report.ipynb`
 

@@ -1,8 +1,8 @@
 # Configuration for Data Health Diagnostic Pipeline
 paths:
-  raw_file: "data/raw/part-00000-e8bf5a9d-af4f-4d1d-890c-cc4422d50c68-c000.snappy.parquet"
+  raw_file: "data/raw/ar/part-00000-8416a86e-f6a9-46bd-bd18-32483f0fee81-c000.snappy.parquet"
   reports_dir: "reports/data_health"
-  geojson_boundaries: "data/raw/Arca_territorio_por_estado.geojson"  # NEW: Path to your GeoJSON file
+  geojson_boundaries: "data/raw/ar/femsa_arg_provincias_ciudades_FINAL.geojson"  # NEW: Path to your GeoJSON file
 
 parameters:
   min_weekly_hours: 20

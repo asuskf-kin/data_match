@@ -226,3 +226,4 @@ data_cleaning/uv.lock
 *.csv#
 *.xlsx
 *.pdf
+*.zip
